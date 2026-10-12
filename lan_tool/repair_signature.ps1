@@ -136,42 +136,10 @@ internal static class SigstoreRepair
             return 0;
         }
 
-        string sigstorePath = Path.Combine(projectDir, "package.sigstore");
-        bool hadSignature = File.Exists(sigstorePath);
-        string backupPath = null;
-        if (hadSignature)
-        {
-            string backupDir = Path.Combine(Directory.GetParent(projectDir).FullName, "signature-backups");
-            Directory.CreateDirectory(backupDir);
-            backupPath = Path.Combine(backupDir, "package.sigstore." +
-                DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + "." +
-                Guid.NewGuid().ToString("N").Substring(0, 8) + ".bak");
-            File.Copy(sigstorePath, backupPath, false);
-            Console.WriteLine("backup=" + backupPath);
-        }
-
-        try
-        {
-            write.Invoke(null, new object[] { package });
-            bool after = Check(test, package);
-            Console.WriteLine("after=" + after);
-            if (!after) throw new InvalidOperationException("Rebuilt signature did not pass the Runtime check.");
-        }
-        catch (Exception repairError)
-        {
-            try
-            {
-                if (hadSignature) File.Copy(backupPath, sigstorePath, true);
-                else if (File.Exists(sigstorePath)) File.Delete(sigstorePath);
-                Console.WriteLine("rollback=RestoredOriginalSignature");
-            }
-            catch (Exception rollbackError)
-            {
-                throw new AggregateException("Signature repair and rollback failed. Backup: " + backupPath,
-                    repairError, rollbackError);
-            }
-            throw;
-        }
+        write.Invoke(null, new object[] { package });
+        bool after = Check(test, package);
+        Console.WriteLine("after=" + after);
+        if (!after) throw new InvalidOperationException("Rebuilt signature did not pass the Runtime check.");
 
         Console.WriteLine("RESULT=REPAIRED");
         return 0;

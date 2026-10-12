@@ -21,7 +21,7 @@ from pathlib import Path
 
 import core_runner as core
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 DB_NAME = "lan_tool.sqlite3"
 
 
@@ -152,13 +152,19 @@ def submit(root, owner, source_ip, values, return_details=False):
         error.connected_device_count = connected_count
         raise error
     identity = "W" + core._utcnow().astimezone(gateway.scheduler.tz).strftime("%Y%m%d%H%M%S") + "_" + secrets.token_hex(8)
-    # Intake only; this does not write Excel or change an executing allocation.
+    # Persist first, then append independently of device allocation.
     with core._project_lock(gateway.lock_path, gateway.settings["lock_timeout_seconds"]):
         with Store(root) as store:
             store.db.execute("INSERT INTO records(task_id,owner,payload,submitted_at,source_ip) VALUES (?,?,?,?,?)",
                              (identity, owner, core._json(payload), core._utcnow().isoformat(), source_ip))
             store.db.commit()
-    return {"task_id": identity, "connected_device_count": connected_count} if return_details else identity
+    append_pending(gateway)
+    with Store(root) as store:
+        record = store.row(identity)
+    result = {"task_id": identity, "connected_device_count": connected_count,
+              "admitted": bool(record["admitted"]),
+              "message": "已追加任务表，等待执行" if record["admitted"] else "提交已暂存，发布结束或表格空闲后自动追加"}
+    return result if return_details else identity
 
 
 def read_book(gateway):
@@ -243,7 +249,8 @@ def snapshot(gateway, state):
 def process_stamp(pid):
     if os.name != "nt":
         try:
-            return Path("/proc", str(pid), "stat").read_text().rsplit(")", 1)[1].split()[19]
+            path = Path("/proc/self/stat") if pid == os.getpid() else Path("/proc", str(pid), "stat")
+            return path.read_text().rsplit(")", 1)[1].split()[19]
         except (OSError, IndexError):
             return None
     from ctypes import wintypes
@@ -267,36 +274,46 @@ def process_stamp(pid):
 
 def register_runner(store, reset=False):
     runners = [] if reset else store.meta("runners", [])
-    runners = [v for v in runners if process_stamp(v["pid"]) == v["stamp"]]
+    runners = [v for v in runners if runner_live(v)]
     own = {"pid": os.getpid(), "stamp": process_stamp(os.getpid())}
     if own not in runners:
         runners.append(own)
     store.put_meta("runners", runners)
 
 
-def safe_boundary(state):
-    if any(v.get("active_task") for v in state["devices"].values()):
-        return False
-    for project in state["project_accounts"].values():
-        entries = list(project["accounts"].values())
-        if any(v["status"] == "RUNNING" for v in entries):
-            return False
-        if any(v.get("claimed_at") or v.get("result") for v in entries) and any(v["status"] not in core.TERMINAL_STATUSES for v in entries):
-            return False
-    return True
+def runner_live(value):
+    stamp = process_stamp(value["pid"])
+    return stamp is not None and stamp in (value.get("stamp"), "unknown-live")
 
 
-def _admit(gateway, state, roster):
-    if not safe_boundary(state):
-        return
+def publishing_active(state, store):
+    """Only live ownership counts as publishing; historical status is not a gate."""
+    runners = store.meta("runners", [])
+    for device in state["devices"].values():
+        active = device.get("active_task")
+        if not active:
+            continue
+        if active.get("owner_pid") and active.get("owner_stamp"):
+            if process_stamp(active["owner_pid"]) in (active["owner_stamp"], "unknown-live"):
+                return True
+        elif any(runner_live(v) for v in runners):
+            return True
+    return False
+
+
+def _admit(gateway, state, roster=None):
+    """Append inputs only. Allocation is the main dispatcher’s responsibility."""
     with Store(gateway.root) as store:
         pending = list(store.db.execute("SELECT * FROM records WHERE admitted=0 AND retained_only=0 ORDER BY submitted_at,task_id"))
+        if not pending:
+            return
+        if publishing_active(state, store):
+            store.db.execute("UPDATE records SET intake_error='正在发布，提交已暂存，发布结束后自动追加。' WHERE admitted=0 AND retained_only=0")
+            store.db.commit()
+            return
         for record in pending:
             identity, payload = record["task_id"], json.loads(record["payload"])
             try:
-                eligible = [v for v in roster if state["devices"].get(v["sender_account_id"], {}).get("state") != "BLOCKED"]
-                if payload["target_device_count"] > len(eligible):
-                    raise core.EngineError("TARGET_COUNT_EXCEEDS_CONNECTED", "执行设备数量超过本次影刀可用连接数量；提交已保留")
                 workbook, sheet, columns, rows, digest = read_book(gateway)
                 try:
                     if identity not in rows:
@@ -304,16 +321,16 @@ def _admit(gateway, state, roster):
                             if field not in columns:
                                 columns[field] = sheet.max_column + 1
                                 sheet.cell(1, columns[field], field)
-                        row = sheet.max_row + 1
-                        if row > 2:
-                            for column in range(1, sheet.max_column + 1):
-                                sheet.cell(row, column)._style = copy.copy(sheet.cell(2, column)._style)
+                        row = max(rows.values(), default=1) + 1
+                        for column in range(1, sheet.max_column + 1):
+                            sheet.cell(row, column)._style = copy.copy(sheet.cell(2, column)._style)
                         fields = dict(Task_ID=identity, Query_Keyword=payload["keyword"], Expected_Author=payload["expected_author"],
                                       Expected_Douyin_ID=payload["expected_douyin_id"], Content_Type=payload["content_type"],
                                       Comments=payload["comments"], Target_Device_Count=payload["target_device_count"],
-                                      Scheduled_Time=payload["scheduled_time"], Status="PENDING", Executed_Actions="", Result_Message="")
+                                      Scheduled_Time=payload.get("scheduled_time") or "0", Status="PENDING", Executed_Actions="", Result_Message="")
                         for field, value in fields.items():
-                            cell = sheet.cell(row, columns[field], value)
+                            cell = sheet.cell(row, columns[field])
+                            cell.value = value
                             if isinstance(value, str):
                                 cell.data_type = "s"
                         save_book(gateway, workbook, digest)
@@ -323,16 +340,24 @@ def _admit(gateway, state, roster):
                             raise core.EngineError("TASK_WRITE_CONFLICT", "同名任务内容被改变，未覆盖")
                 finally:
                     workbook.close()
-                gateway._allocate_task_locked(state, identity, roster)
                 store.db.execute("UPDATE records SET admitted=1,intake_error='' WHERE task_id=?", (identity,))
             except Exception as exc:
-                message = str(exc)
-                store.db.execute("UPDATE records SET intake_error=? WHERE task_id=?", (message, identity))
-                # A persisted engine transaction must recover before more writes.
-                if state.get("pending_transaction"):
-                    store.db.commit()
-                    return
+                store.db.execute("UPDATE records SET intake_error=? WHERE task_id=?", (str(exc), identity))
+                store.db.commit()
+                # File occupancy affects the table, so retry the remaining rows later.
+                return
             store.db.commit()
+
+
+def append_pending(gateway):
+    with Store(gateway.root) as store:
+        if not store.db.execute("SELECT 1 FROM records WHERE admitted=0 AND retained_only=0 LIMIT 1").fetchone():
+            return
+    try:
+        with gateway._session(recover=False) as state:
+            _admit(gateway, state)
+    except Exception as exc:
+        gateway.logger.warning("web_append_deferred reason=%s", exc)
 
 
 def prepare(gateway, roster):
@@ -347,7 +372,7 @@ def prepare(gateway, roster):
             finally:
                 workbook.close()
             capture(gateway, state, table)
-            _admit(gateway, state, roster)
+            _admit(gateway, state)
     except Exception as exc:
         gateway.logger.warning("web_intake_unavailable reason=%s", exc)
 
@@ -359,12 +384,7 @@ def before_read(gateway):
         with gateway._session() as state:
             with Store(gateway.root) as store:
                 register_runner(store)
-                roster = store.meta("roster")
-                workers = set(store.meta("workers", []))
-            # A controller's returned list is fixed for its current iteration.
-            # Do not assign new work to phones that iteration cannot reach.
-            if roster and {v["sender_account_id"] for v in roster}.issubset(workers):
-                _admit(gateway, state, roster)
+            _admit(gateway, state)
     except Exception as exc:
         gateway.logger.warning("web_intake_unavailable reason=%s", exc)
 
@@ -401,7 +421,7 @@ def ended_history(progress):
 
 
 def stopped_check(root, store):
-    if any(process_stamp(v["pid"]) in (v["stamp"], "unknown-live") for v in store.meta("runners", [])):
+    if any(runner_live(v) for v in store.meta("runners", [])):
         raise core.EngineError("EXECUTION_STILL_RUNNING", "影刀执行进程仍在运行；请先停止影刀运行")
     if os.name == "nt":
         # Also cover old executions made before the intake hooks were installed.
@@ -517,12 +537,30 @@ def cleanup(root, identity, owner, admin, stopped=False):
         return {"task_id": identity, "message": "该任务的运行记录和占用已清理，历史及错误仍可查看", "warning": warning}
 
 
+def resume(root, identity, owner, admin, sender_account_id=None, stopped=False):
+    identity = core._task_id(identity)
+    gateway = gateway_for(root)
+    with gateway._session(recover=False) as state:
+        with Store(root) as store:
+            record = store.row(identity)
+            if not record or record["retained_only"] or not admin and record["owner"] != owner:
+                raise core.EngineError("NOT_FOUND", "找不到这个任务")
+            if stopped:
+                if not admin:
+                    raise core.EngineError("STOP_REQUIRED", "中断记录仅可在B本机停止影刀后续发")
+                stopped_check(root, store)
+            result = gateway._request_resume_locked(state, identity, sender_account_id, stopped)
+            capture(gateway, state)
+    return {"task_id": identity, "progress": public_progress(result["progress"]),
+            "message": "已保留进度并恢复未完成设备，等待影刀执行；已成功设备不会重做"}
+
+
 def public_progress(progress):
     if not progress:
         return None
     keys = ("task_id", "target_device_count", "assigned_device_count", "finished_device_count", "completed", "status", "counts")
     result = {k: progress.get(k) for k in keys}
-    result["accounts"] = [{k: entry.get(k) for k in ("sender_account_id", "physical_device_id", "status", "claimed_at", "finished_at", "counts", "error_code", "log_message", "executed_actions")}
+    result["accounts"] = [{k: entry.get(k) for k in ("sender_account_id", "physical_device_id", "status", "claimed_at", "finished_at", "counts", "error_code", "log_message", "executed_actions", "previous_error")}
                           for entry in progress.get("accounts", [])]
     return result
 
@@ -550,17 +588,17 @@ def _live_records(gateway, root, admin):
             live[identity] = gateway._project_progress(state, identity)
         active_ids = {(v.get("active_task") or {}).get("task_id") for v in state["devices"].values()}
         pending_write_id = (state.get("pending_transaction") or {}).get("task_id")
-    return warning, live, table, active_ids, pending_write_id
+    return warning, live, table, active_ids, pending_write_id, (state.get("dispatch") or {}).get("issues", {})
 
 
 def records(root, owner, admin):
     gateway = gateway_for(root)
     readable = True
     try:
-        warning, live, table, active_ids, pending_write_id = _live_records(gateway, root, admin)
+        warning, live, table, active_ids, pending_write_id, issues = _live_records(gateway, root, admin)
     except Exception as exc:
         warning = str(exc) if admin else "运行数据暂不可读取；已提交的任务及历史仍保留"
-        live, table, active_ids, pending_write_id, readable = {}, {}, set(), None, False
+        live, table, active_ids, pending_write_id, issues, readable = {}, {}, set(), None, {}, False
     with Store(root) as store:
         output = []
         for record in store.rows(owner, admin):
@@ -573,15 +611,17 @@ def records(root, owner, admin):
             malformed = bool(row_status and row_status not in {v.value for v in core.TaskStatus})
             ended_error = bool(progress and progress["completed"] and is_error(progress))
             can_clean = readable and not record["retained_only"] and ((ended_error and not interrupted) or (admin and (interrupted or malformed or record["intake_error"])))
-            intake_error = record["intake_error"]
-            if intake_error and not admin and "执行设备数量超过本次影刀可用连接数量" not in intake_error:
+            intake_error = issues.get(identity) or record["intake_error"]
+            if intake_error and not admin and not any(text in intake_error for text in ("设备数量", "本轮不可执行", "正在发布")):
                 intake_error = "任务接入未完成，请联系B电脑查看具体原因；提交已保留"
             output.append({"task_id": identity, "submitted_at": record["submitted_at"],
                            "source_ip": record["source_ip"] if admin else "",
                            "payload": payload, "status": (progress or {}).get("status") or row_status or "PENDING",
                            "admitted": bool(record["admitted"]), "progress": public_progress(progress),
                            "intake_error": intake_error, "can_cleanup": bool(can_clean),
-                           "requires_stop": bool(can_clean and (interrupted or malformed or record["intake_error"]))})
+                           "requires_stop": bool(can_clean and (interrupted or malformed or record["intake_error"])),
+                           "can_resume": bool(readable and not record["retained_only"] and progress and any(v["status"] in ("FAILED", "PENDING") for v in progress["accounts"])),
+                           "can_resume_interrupted": bool(readable and admin and not record["retained_only"] and identity in active_ids)})
     return {"records": output, "warning": warning}
 
 
@@ -623,7 +663,7 @@ def errors(root, owner, admin, task_id=None):
                         continue
                     if task_id is not None and identity != task_id:
                         continue
-                    output.append({k: value.get(k, "") for k in ("recorded_at", "task_id", "sender_account_id", "physical_device_id", "error_code", "log_message", "executed_actions")})
+                    output.append({k: value.get(k, "") for k in ("recorded_at", "task_id", "sender_account_id", "physical_device_id", "error_code", "log_message", "executed_actions", "previous_error")})
                 except (ValueError, AttributeError, core.EngineError):
                     continue
     for identity, record in allowed.items():
@@ -632,11 +672,13 @@ def errors(root, owner, admin, task_id=None):
         if record["intake_error"]:
             output.append({"task_id": identity, "recorded_at": record["submitted_at"], "source": "任务接入", "log_message": record["intake_error"]})
         for account in (record["progress"] or {}).get("accounts", []):
-            if account["status"] != "FAILED":
+            previous = account.get("previous_error") or {}
+            error = account if account["status"] == "FAILED" else previous
+            if not error.get("error_code") and not error.get("log_message"):
                 continue
-            value = dict(task_id=identity, recorded_at=account["finished_at"], source="执行结果",
+            value = dict(task_id=identity, recorded_at=error.get("finished_at"), source="执行结果",
                          sender_account_id=account["sender_account_id"], physical_device_id=account["physical_device_id"],
-                         error_code=account["error_code"], log_message=account["log_message"], executed_actions=account["executed_actions"])
+                         error_code=error.get("error_code", ""), log_message=error.get("log_message", ""), executed_actions=account["executed_actions"])
             if not any(v.get("task_id") == identity and v.get("sender_account_id") == value["sender_account_id"] and v.get("error_code") == value["error_code"] and v.get("log_message") == value["log_message"] for v in output):
                 output.append(value)
     if admin and task_id is None:

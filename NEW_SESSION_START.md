@@ -1,3 +1,23 @@
+## 2026-10-12 v1.1.1设备数量修复完成，待B安装
+
+用户已确认A1、A4、A3、A2配置完成：主流程20行，子流程198行；当前未称手机运行通过。集中验证停在设备数量，实际两台连接而网页显示1台。B文件中79jb9hifaecadqdq为IsConnected=True/IsReady=True，uc4lztkbzdjr4thu为False/True；拔掉一台及接回两台，字段完全不变。因此JSON只用作登记名单，IsConnected和IsReady均不作为实时数量。
+
+B实际现有服务：127.0.0.1:5037，监听PID当时8396（还监听8200），程序C:\ProgramData\ShadowBot\support_x64\mobile\AndroidSDK\platform-tools\adb.exe。PID不写死。另有scrcpy来自D:\app\ShadowBot\shadowbot-6.3.34\support_x64\mobile\adb.exe，不据此猜Runtime路径。
+
+v1.1.1仅通过Windows原生只读接口验证现有5037服务路径，直接TCP发送host:devices，按登记安卓Udid与实时device状态交叉统计。不执行adb.exe、不启动/停止服务、不发手机命令、不建Appium会话、不注入、不新增采集包或前端轮询。页面打开、提交各读取；提交超量优先于评论不足，输入拒绝也更新当前数量。48项检查通过（原生Windows调用为隔离模拟），B新读取方式仍待安装后验证。
+
+交付DouyinTaskTool_v1.1.1_B.zip及B_设备数量修复_v1.1.1_20261012.md。保存并停止主流程，保持影刀和手机管理器打开，关闭原网页后台及Excel/WPS。把新包全部内容直接覆盖Y:\APP\DouyinTaskTool_v1.1.0_B，双击该目录更新后的Start-Tool.cmd。使用--web-only，仅更新网页工具；核心、模块、流程、元素、UUID、原生签名及所有业务数据不写入，无备份。当前B仍为v1.1.0，不能写已更新或真机通过。
+
+已配置台账：
+- A1：原192—198共7行整体移动到原第8等待之后，成为9—15，尾部不保留；子流程198行。
+- A4：第5 executed_actions为Python task_data.get("action_results", [])；121 prepare_interactions→interaction_plan（任意类型），122 ForEach，无第二处初始化。130 Like、159 Comment、171 Favorite、187 Share均传task_data，返回列表executed_actions；message原Python空字符串''与""等价。
+- A3：子流程195 Catch exception、196原日志、197改finish_device_error(sender_account_id, physical_device_id, str(exception), device_identity["task_id"])→字典device_error_result，198 EndTry。主流程另包调用子流程，身份及Task_ID来自device_identity，异常入口不依赖子流程局部task_data。
+- A2：主流程1—6原连接/汇总；7 start_execution(connection_infos)→列表device_bindings；8 While True==True；9 prepare_devices(connection_infos)→列表device_bindings；10 IF len(device_bindings)==0；11退出当前循环；12 EndIF；13 ForEach device_bindings→device_identity；14 Try；15子流程1（phone_devices[device_identity["connection_index"]]、device_identity）；16 Catch device_exception；17 finish_device_error；18 EndTry；19设备循环结束；20外层条目循环结束。
+
+下一步：先安装v1.1.1并验证2→1→2及超量优先提示，通过后继续入表、启动初始化、连续执行、断线续发和手动中断续接。保留用户所有已定排除项，不重配手机元素或增加回退分叉。配置完成不等于现场测试通过。
+
+---
+
 ## 2026-10-12 15:51 B升级现场通过，下一步启动初始化
 
 用户提交B真实完整输出：PC-20220919TRCR；实际IP192.168.15.84；Python3.13.10；VERSION=1.1.0、RESULT=TOOL_UPDATED；6.3.31 Runtime原生签名before=True、RESULT=ALREADY_VALID；本机HTTP检查通过。块7已在B完成；其它电脑本轮访问、新任务入表、状态文件实时更新及手机执行尚未现场验证。

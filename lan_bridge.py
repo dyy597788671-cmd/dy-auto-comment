@@ -14,14 +14,16 @@ import json
 import os
 import re
 import secrets
+import socket
 import sqlite3
+import struct
 import subprocess
 import time
 from pathlib import Path
 
 import core_runner as core
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 DB_NAME = "lan_tool.sqlite3"
 
 
@@ -75,10 +77,102 @@ def gateway_for(root):
     return core.UnifiedGateway(str(root), configured[0] if configured else "web-tool")
 
 
+def _adb_listener_pid():
+    """Inspect the existing IPv4 listener; this does not launch any process."""
+    if os.name != "nt":
+        raise OSError("设备服务查询需要Windows")
+    api = ctypes.WinDLL("iphlpapi", use_last_error=True).GetExtendedTcpTable
+    uint = ctypes.c_uint32
+    api.argtypes = (ctypes.c_void_p, ctypes.POINTER(uint), ctypes.c_int,
+                    uint, ctypes.c_int, uint)
+    api.restype = uint
+    size = uint(0)
+    # AF_INET=2, TCP_TABLE_OWNER_PID_LISTENER=3.
+    result = api(None, ctypes.byref(size), False, 2, 3, 0)
+    if result not in (0, 122) or size.value < 4:
+        raise OSError("无法读取现有手机服务监听信息")
+    table = ctypes.create_string_buffer(size.value)
+    result = api(table, ctypes.byref(size), False, 2, 3, 0)
+    if result:
+        raise OSError("无法读取现有手机服务监听信息")
+    data = table.raw[:size.value]
+    count = struct.unpack_from("<I", data)[0]
+    owners = set()
+    if len(data) < 4 + count * 24:
+        raise OSError("手机服务监听信息不完整")
+    for index in range(count):
+        state, address, port, _, _, pid = struct.unpack_from("<6I", data, 4 + index * 24)
+        host = socket.inet_ntoa(struct.pack("<I", address))
+        if state == 2 and socket.ntohs(port & 0xffff) == 5037 and host in ("127.0.0.1", "0.0.0.0"):
+            owners.add(pid)
+    if len(owners) != 1:
+        raise OSError("未取得影刀现有5037服务")
+    return owners.pop()
+
+
+def _process_image(pid):
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    uint = ctypes.c_uint32
+    kernel.OpenProcess.argtypes = (uint, ctypes.c_int, uint)
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.QueryFullProcessImageNameW.argtypes = (ctypes.c_void_p, uint,
+                                                ctypes.c_wchar_p, ctypes.POINTER(uint))
+    kernel.QueryFullProcessImageNameW.restype = ctypes.c_int
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel.CloseHandle.restype = ctypes.c_int
+    handle = kernel.OpenProcess(0x1000, False, pid)
+    if not handle:
+        raise OSError("无法读取手机服务路径")
+    try:
+        size = uint(32768)
+        name = ctypes.create_unicode_buffer(size.value)
+        if not kernel.QueryFullProcessImageNameW(handle, 0, name, ctypes.byref(size)):
+            raise OSError("无法读取手机服务路径")
+        return name.value
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _read_adb_online_devices():
+    """One host:devices request to ShadowBot's already-running server only."""
+    program_data = os.environ.get("PROGRAMDATA")
+    if not program_data:
+        raise OSError("无法定位影刀手机服务")
+    expected = Path(program_data) / "ShadowBot/support_x64/mobile/AndroidSDK/platform-tools/adb.exe"
+    actual = _process_image(_adb_listener_pid())
+    if os.path.normcase(os.path.normpath(actual)) != os.path.normcase(os.path.normpath(str(expected))):
+        raise OSError("5037端口不是当前影刀手机服务")
+
+    def receive(connection, size):
+        chunks = bytearray()
+        while len(chunks) < size:
+            value = connection.recv(size - len(chunks))
+            if not value:
+                raise OSError("手机服务返回不完整")
+            chunks.extend(value)
+        return bytes(chunks)
+
+    # No adb.exe invocation, server start/kill, transport selection or phone command.
+    with socket.create_connection(("127.0.0.1", 5037), timeout=2) as connection:
+        connection.sendall(b"000chost:devices")
+        if receive(connection, 4) != b"OKAY":
+            raise OSError("手机服务没有返回设备名单")
+        length = int(receive(connection, 4), 16)
+        content = receive(connection, length).decode("utf-8")
+    online = set()
+    for line in content.splitlines():
+        serial, separator, state = line.partition("\t")
+        if not separator or not serial.strip() or not state.strip():
+            raise ValueError("手机服务设备名单格式不正确")
+        if state.strip() == "device":
+            online.add(serial.strip().casefold())
+    return online
+
+
 def connected_device_count():
-    """Read ShadowBot's own status file on demand; never connect a phone."""
+    """Intersect registration IDs with live status from the existing service."""
     local_app_data = os.environ.get("LOCALAPPDATA")
-    message = "无法读取影刀当前设备状态，请确认B电脑的影刀手机管理器已打开。"
+    message = "无法读取影刀当前设备状态，请确认B电脑的影刀手机管理器已打开，现有手机连接服务正在运行。"
     if not local_app_data:
         raise core.EngineError("DEVICE_STATUS_UNAVAILABLE", message)
     path = Path(local_app_data) / "ShadowBot" / "mobile_device_connects.json"
@@ -92,19 +186,16 @@ def connected_device_count():
                 raise ValueError("设备状态项格式不正确")
             if value.get("PlatformName") != "Android":
                 continue
-            if not isinstance(value.get("IsConnected"), bool):
-                raise ValueError("缺少设备连接状态")
-            if value["IsConnected"]:
-                identity = value.get("Udid")
-                if not isinstance(identity, str) or not identity.strip():
-                    raise ValueError("已连接设备缺少标识")
-                devices.add(identity.strip())
-        return len(devices)
+            identity = value.get("Udid")
+            if not isinstance(identity, str) or not identity.strip():
+                raise ValueError("已登记设备缺少标识")
+            devices.add(identity.strip().casefold())
+        return len(devices & _read_adb_online_devices())
     except (OSError, UnicodeError, ValueError) as exc:
         raise core.EngineError("DEVICE_STATUS_UNAVAILABLE", message) from exc
 
 
-def validate_payload(values, gateway):
+def validate_payload(values, gateway, connected_count=None):
     allowed = {"keyword", "expected_author", "expected_douyin_id", "content_type",
                "comments", "target_device_count", "scheduled_time"}
     if not isinstance(values, dict) or set(values) - allowed:
@@ -122,13 +213,15 @@ def validate_payload(values, gateway):
     if not result["expected_douyin_id"] or re.search(r"\s|[:：]", result["expected_douyin_id"]):
         raise core.EngineError("INVALID_INPUT", "请输入完整抖音号")
     core._validate_route(result["content_type"], result["content_type"], {})
+    count = core._target_count(values.get("target_device_count"))
+    if count is None:
+        raise core.EngineError("INVALID_INPUT", "请填写执行设备数量")
+    if connected_count is not None and count > connected_count:
+        raise core.EngineError("TARGET_COUNT_EXCEEDS_CONNECTED", core._device_count_message(connected_count, count))
     comments = values.get("comments")
     if not isinstance(comments, str) or len(comments) > 32767:
         raise core.EngineError("INVALID_INPUT", "评论必须为不超过32767字的文本，每行一条")
     pool = core._comment_pool(comments)
-    count = core._target_count(values.get("target_device_count"))
-    if count is None:
-        raise core.EngineError("INVALID_INPUT", "请填写执行设备数量")
     if len(pool) < count:
         raise core.EngineError("COMMENTS_INSUFFICIENT", core._comment_count_message(len(pool), count))
     result.update(comments="\n".join(pool), target_device_count=count)
@@ -144,13 +237,12 @@ def validate_payload(values, gateway):
 
 def submit(root, owner, source_ip, values, return_details=False):
     gateway = gateway_for(root)
-    payload = validate_payload(values, gateway)
     connected_count = connected_device_count()
-    requested = payload["target_device_count"]
-    if requested > connected_count:
-        error = core.EngineError("TARGET_COUNT_EXCEEDS_CONNECTED", core._device_count_message(connected_count, requested))
-        error.connected_device_count = connected_count
-        raise error
+    try:
+        payload = validate_payload(values, gateway, connected_count)
+    except core.EngineError as exc:
+        exc.connected_device_count = connected_count
+        raise
     identity = "W" + core._utcnow().astimezone(gateway.scheduler.tz).strftime("%Y%m%d%H%M%S") + "_" + secrets.token_hex(8)
     # Persist first, then append independently of device allocation.
     with core._project_lock(gateway.lock_path, gateway.settings["lock_timeout_seconds"]):

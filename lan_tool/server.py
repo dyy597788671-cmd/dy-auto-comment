@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import sys
+import threading
 import webbrowser
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,6 +38,23 @@ class ToolServer(ThreadingHTTPServer):
         with bridge.Store(root) as store:
             self.secret = bytes.fromhex(store.meta("secret"))
         super().__init__(address, Handler)
+        self._append_stop = threading.Event()
+        self._append_worker = threading.Thread(target=self._append_loop, daemon=True)
+        self._append_worker.start()
+
+    def _append_loop(self):
+        gateway = bridge.gateway_for(self.root)
+        while not self._append_stop.is_set():
+            try:
+                bridge.append_pending(gateway)
+            except Exception as exc:
+                gateway.logger.warning("web_append_worker_unavailable reason=%s", exc)
+            self._append_stop.wait(1.0)
+
+    def server_close(self):
+        self._append_stop.set()
+        self._append_worker.join(timeout=1.5)
+        super().server_close()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -103,7 +121,7 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, exc, cookie):
         code = getattr(exc, "code", "TOOL_ERROR")
         status = 404 if code == "NOT_FOUND" else 403 if code == "ACCESS_DENIED" else 409 if code in ("STOP_REQUIRED", "EXECUTION_STILL_RUNNING", "NOT_AN_ERROR", "LOCK_TIMEOUT", "EXCEL_IO_FAILED", "CLEANUP_PENDING") else 400
-        message = str(exc) if self._admin() or code in ("INVALID_INPUT", "COMMENTS_EMPTY", "COMMENTS_INSUFFICIENT", "INVALID_CONTENT_TYPE", "INVALID_TARGET_COUNT", "INVALID_SCHEDULE", "TARGET_COUNT_EXCEEDS_CONNECTED", "DEVICE_STATUS_UNAVAILABLE", "NOT_FOUND", "ACCESS_DENIED", "STOP_REQUIRED", "NOT_AN_ERROR") else "当前操作未完成，请联系B电脑处理；你的提交和历史仍保留"
+        message = str(exc) if self._admin() or code in ("INVALID_INPUT", "COMMENTS_EMPTY", "COMMENTS_INSUFFICIENT", "INVALID_CONTENT_TYPE", "INVALID_TARGET_COUNT", "INVALID_SCHEDULE", "TARGET_COUNT_EXCEEDS_CONNECTED", "DEVICE_STATUS_UNAVAILABLE", "NOT_FOUND", "ACCESS_DENIED", "STOP_REQUIRED", "NOT_AN_ERROR", "NOTHING_TO_RESUME", "PROJECT_NOT_ALLOCATED", "DEVICE_UNAVAILABLE") else "当前操作未完成，请联系B电脑处理；你的提交和历史仍保留"
         result = {"ok": False, "error_code": code, "message": message}
         count = getattr(exc, "connected_device_count", None)
         if code == "TARGET_COUNT_EXCEEDS_CONNECTED" and isinstance(count, int):
@@ -163,8 +181,16 @@ class Handler(BaseHTTPRequestHandler):
             route = urlsplit(self.path).path
             if route == "/api/tasks":
                 result = bridge.submit(self.server.root, owner, self.client_address[0], values, return_details=True)
-                result["message"] = "提交已保存，将在影刀条目边界接入执行"
                 self._json({"ok": True, "data": result}, 201, cookie)
+            elif route.startswith("/api/resume/"):
+                if not isinstance(values, dict) or set(values) - {"sender_account_id", "stopped"} or not isinstance(values.get("stopped", False), bool):
+                    raise core.EngineError("INVALID_INPUT", "续发参数不正确")
+                account = values.get("sender_account_id")
+                if account is not None and (not isinstance(account, str) or not account.strip()):
+                    raise core.EngineError("INVALID_INPUT", "续发设备参数不正确")
+                identity = unquote(route[len("/api/resume/"):])
+                result = bridge.resume(self.server.root, identity, owner, self._admin(), account, values.get("stopped", False))
+                self._json({"ok": True, "data": result}, cookie=cookie)
             elif route.startswith("/api/cleanup/"):
                 if not isinstance(values, dict) or set(values) - {"stopped"} or not isinstance(values.get("stopped", False), bool):
                     raise core.EngineError("INVALID_INPUT", "清理参数不正确")

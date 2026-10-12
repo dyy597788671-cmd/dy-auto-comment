@@ -759,6 +759,9 @@ class UnifiedGateway:
             projects = state.setdefault("project_accounts", {})
             if not isinstance(state.setdefault("exports_dirty", False), bool):
                 raise ValueError("输出恢复标记无效")
+            dirty = state.setdefault("dirty_projects", [])
+            if not isinstance(dirty, list) or any(not isinstance(v, str) for v in dirty):
+                raise ValueError("待回写项目记录无效")
             if not isinstance(projects, dict):
                 raise ValueError("项目账号进度须为对象")
             for identity, project in projects.items():
@@ -792,6 +795,8 @@ class UnifiedGateway:
                         raise ValueError("分配评论无效")
                     if entry.get("comment_content"):
                         comments.append(entry["comment_content"])
+                    if "resume_actions" in entry:
+                        self._actions(entry["resume_actions"])
                     if entry["status"] == "RUNNING":
                         active = state["devices"].get(account, {}).get("active_task")
                         if (not active or active["task_id"] != identity
@@ -847,14 +852,59 @@ class UnifiedGateway:
                              update["task_id"], update["fields"]["Status"])
 
     def _recover(self, state: Dict[str, Any]) -> None:
-        self._replay(state)
+        self._sync_dirty_projects(state)
         # A security block can preempt a claim even while Excel is occupied.
         for identity, device in state["devices"].items():
             if device["state"] == "BLOCKED" and device.get("active_task"):
                 info = device["block_info"]
                 self._finish(state, identity, device, "FAILED", info["executed_actions"],
                              "SECURITY_CHALLENGE_DETECTED", info["log_message"], True)
-        self._flush_exports(state)
+        self._try_flush_exports(state)
+
+    def _try_flush_exports(self, state: Dict[str, Any]) -> None:
+        try:
+            self._flush_exports(state)
+        except EngineError as exc:
+            if exc.code != "EXECUTION_DATA_WRITE_FAILED":
+                raise
+            self.logger.warning("execution_export_pending reason=%s", exc)
+
+    def _sync_dirty_projects(self, state: Dict[str, Any]) -> None:
+        """Retry pending table writes without holding up saved mobile progress."""
+        try:
+            self._replay(state)
+            for identity in list(state.setdefault("dirty_projects", [])):
+                if identity not in state["project_accounts"]:
+                    state["dirty_projects"].remove(identity)
+                    self._save_state(state)
+                    continue
+                self._commit(state, self._project_update(state, identity))
+                state["dirty_projects"].remove(identity)
+                self._save_state(state)
+        except EngineError as exc:
+            if exc.code not in ("WRITE_PENDING", "EXCEL_IO_FAILED", "EXCEL_WRITE_CONFLICT",
+                                "EXECUTION_DATA_WRITE_FAILED", "TASK_WRITE_CONFLICT", "RESULT_TOO_LONG"):
+                raise
+            self.logger.warning("project_write_pending reason=%s", exc)
+
+    def _sync_project(self, state: Dict[str, Any], identity: str) -> None:
+        """Persist ownership/results first; Excel and exports can catch up."""
+        dirty = state.setdefault("dirty_projects", [])
+        if identity not in dirty:
+            dirty.append(identity)
+        state["exports_dirty"] = True
+        self._save_state(state)
+        self._sync_dirty_projects(state)
+        self._try_flush_exports(state)
+
+    @staticmethod
+    def _entry_actions(state: Dict[str, Any], identity: str, account: str) -> List[Dict[str, str]]:
+        entry = state["project_accounts"][identity]["accounts"][account]
+        active = state["devices"].get(account, {}).get("active_task")
+        if active and active["task_id"] == identity:
+            return active.get("action_results", [])
+        result = entry.get("result")
+        return result["executed_actions"] if result else entry.get("resume_actions", [])
 
     def _register_active(self, state: Dict[str, Any], account_id: str,
                          active: Dict[str, Any]) -> Dict[str, Any]:
@@ -916,7 +966,7 @@ class UnifiedGateway:
         for account, entry in entries.items():
             result = entry.get("result") or {}
             actions[account] = [{"action": value["action"], "status": value["status"]}
-                               for value in result.get("executed_actions", [])]
+                               for value in self._entry_actions(state, task_id, account)]
             summaries[account] = {"status": entry["status"],
                                   "comment_sent": entry.get("comment_sent", False),
                                   "finished_at": result.get("finished_at"),
@@ -1024,7 +1074,7 @@ class UnifiedGateway:
                 "comment_content": comment, "comment_sent": False, "run_token": None,
                 "claimed_at": None, "result": None}
                 for value, comment in zip(selected, comments)}}
-        self._commit(state, self._project_update(state, identity))
+        self._sync_project(state, identity)
         return self._project_progress(state, identity)
 
     def _project_progress(self, state: Dict[str, Any], identity: str) -> Dict[str, Any]:
@@ -1040,7 +1090,7 @@ class UnifiedGateway:
             result = entry.get("result")
             active = state["devices"].get(account, {}).get("active_task")
             active = active if active and active["task_id"] == identity else None
-            actions = result["executed_actions"] if result else active.get("action_results", []) if active else []
+            actions = self._entry_actions(state, identity, account) if entry else []
             passed = {v["action"] for v in actions if v["status"] == "PASSED"}
             plan = active.get("strategy") if active else entry.get("plan")
             details.append({"sender_account_id": account,
@@ -1051,7 +1101,7 @@ class UnifiedGateway:
                             "finished_at": result.get("finished_at") if result else None,
                             "last_progress_at": (result.get("finished_at") if result else
                                                  active.get("last_progress_at", active.get("claimed_at")) if active else None),
-                            "resume_requires_review": bool(active and active.get("strategy")),
+                            "resume_requires_review": False,
                             "comment_sent": entry.get("comment_sent", False),
                             "executed_actions": _copy(actions),
                             "planned_actions": plan.get("execution_order", []) if plan else [],
@@ -1085,7 +1135,8 @@ class UnifiedGateway:
         if not state.get("exports_dirty"):
             return
         accounts = {account for project in state["project_accounts"].values()
-                    for account, entry in project["accounts"].items() if entry.get("result") is not None}
+                    for account, entry in project["accounts"].items()
+                    if entry.get("result") is not None or entry.get("previous_result") is not None}
         for account in sorted(accounts):
             self._write_execution_data(state, account)
         output = {"schema_version": 1, "projects": [self._project_progress(state, identity)
@@ -1124,7 +1175,7 @@ class UnifiedGateway:
             entry["comment_sent"] = any(v["action"] == "Comment" and v["status"] == "PASSED" for v in actions)
             state["exports_dirty"] = True
             self._save_state(state)
-            self._flush_exports(state)
+            self._try_flush_exports(state)
             return _copy(actions)
 
     def close_pending_assignment(self, task_id: Union[str, int], sender_account_id: str,
@@ -1146,7 +1197,7 @@ class UnifiedGateway:
                 "status": "FAILED", "executed_actions": [], "finished_at": now,
                 "error_code": "ASSIGNMENT_CLOSED_BY_OPERATOR", "log_message": reason,
                 "operator": operator})
-            self._commit(state, self._project_update(state, identity))
+            self._sync_project(state, identity)
             return self._project_progress(state, identity)
 
     def adopt_legacy_task(self, legacy_device_id: str = "default-device") -> bool:
@@ -1233,10 +1284,9 @@ class UnifiedGateway:
         writer.writerow(("执行账号", "项目ID", "点赞次数", "收藏次数", "评论次数", "分享次数"))
         for task_id, project in state["project_accounts"].items():
             entry = project["accounts"].get(sender_account_id)
-            result = entry.get("result") if entry else None
-            if result is None:
+            if entry is None or not (entry.get("result") or entry.get("previous_result")):
                 continue
-            passed = {item["action"] for item in result["executed_actions"]
+            passed = {item["action"] for item in self._entry_actions(state, task_id, sender_account_id)
                       if item["status"] == "PASSED"}
             writer.writerow((sender_account_id, task_id,
                              int("Like" in passed), int("Favorite" in passed),
@@ -1278,7 +1328,7 @@ class UnifiedGateway:
         entry.update(status=status, result=result,
                      comment_sent=any(value["action"] == "Comment" and value["status"] == "PASSED"
                                       for value in actions))
-        self._commit(state, self._project_update(state, active["task_id"]))
+        self._sync_project(state, active["task_id"])
         return _copy(result)
 
     def get_next_task(self, physical_device_id: Optional[str] = None,
@@ -1326,9 +1376,15 @@ class UnifiedGateway:
                                   " 没有未分配评论，请先补充Comments")
             task["comment_content"] = entry["comment_content"] if assignment else secrets.choice(available)
             active = self.devices.claim(device, task, now)
+            if entry and entry.get("resume_actions"):
+                active["action_results"] = _copy(entry["resume_actions"])
+            if entry and entry.get("plan"):
+                active["strategy"] = _copy(entry["plan"])
+                active["strategy"].update(task_id=task["task_id"], run_token=active["run_token"])
+                entry["plan"] = _copy(active["strategy"])
             self._set_workspace(active)
             self._register_active(state, self.device_id, active)
-            self._commit(state, self._project_update(state, task["task_id"]))
+            self._sync_project(state, task["task_id"])
             return _copy(active)
 
     def get_active_task(self, physical_device_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -1398,6 +1454,106 @@ class UnifiedGateway:
             return dict(_copy(device), device_id=self.device_id,
                         cooldown_remaining_seconds=round(remaining, 3))
 
+    def request_resume(self, task_id: Union[str, int], sender_account_id: Optional[str] = None,
+                       allow_active: bool = False) -> Dict[str, Any]:
+        """Queue unfinished assigned devices, preserving their original plan and confirmations."""
+        identity = _task_id(task_id)
+        with self._session(recover=False) as state:
+            project = state["project_accounts"].get(identity)
+            if not project or not project.get("assignment"):
+                raise EngineError("PROJECT_NOT_ALLOCATED", "此任务尚未分配设备，按原流程执行即可")
+            entries = project["accounts"]
+            if sender_account_id is not None and sender_account_id not in entries:
+                raise EngineError("NOT_FOUND", "此设备不属于该任务")
+            accounts = [sender_account_id] if sender_account_id is not None else list(entries)
+            resumed = []
+            for account in accounts:
+                entry = entries[account]
+                if entry["status"] in ("SUCCESS", "NOT_FOUND"):
+                    continue
+                device = state["devices"].get(account, {})
+                if device.get("state") == "BLOCKED":
+                    if sender_account_id is not None:
+                        raise EngineError("DEVICE_UNAVAILABLE", "该设备仍处于原有熔断状态，请先按原方式处理")
+                    continue
+                active = device.get("active_task")
+                active = active if active and active["task_id"] == identity else None
+                if active and not allow_active:
+                    if sender_account_id is not None:
+                        raise EngineError("STOP_REQUIRED", "该设备存在运行任务，仅B本机停止影刀后可续接中断记录")
+                    continue
+                if entry["status"] == "PENDING":
+                    resumed.append(account)
+                    continue
+                actions = self._actions(self._entry_actions(state, identity, account))
+                saved = []
+                for action in actions:
+                    if action["status"] not in ("PASSED", "SKIPPED_ALREADY_ACTIVE"):
+                        break
+                    saved.append(action)
+                plan = (active.get("strategy") if active else None) or entry.get("plan")
+                if saved and (not plan or [v["action"] for v in saved] != plan["execution_order"][:len(saved)]):
+                    raise EngineError("ACTION_ORDER_CONFLICT", "已保存动作与原计划不一致，未更改续发记录")
+                if entry.get("result"):
+                    entry["previous_result"] = _copy(entry["result"])
+                entry.update(status="PENDING", result=None, run_token=None, claimed_at=None,
+                             resume_actions=saved,
+                             comment_sent=any(v["action"] == "Comment" and v["status"] == "PASSED" for v in saved))
+                if plan:
+                    entry["plan"] = _copy(plan)
+                if active:
+                    device.update(state="READY", active_task=None, cooldown_until=None)
+                resumed.append(account)
+            if not resumed:
+                raise EngineError("NOTHING_TO_RESUME", "没有可续发的未完成设备；已成功设备不会重做")
+            self._sync_project(state, identity)
+            return {"task_id": identity, "resumed_accounts": resumed,
+                    "progress": self._project_progress(state, identity)}
+
+    def remaining_strategy(self, task_id: str, run_token: str) -> Dict[str, Any]:
+        """Return only remaining steps; the persisted strategy remains complete."""
+        plan = self.generate_strategy(task_id=task_id, run_token=run_token)
+        with self._session() as state:
+            active = self._owned(state["devices"][self.device_id], _task_id(task_id), run_token)
+            saved = active.get("action_results", [])
+            if [v["action"] for v in saved] != plan["execution_order"][:len(saved)]:
+                raise EngineError("ACTION_ORDER_CONFLICT", "已保存进度与原互动计划不一致")
+            remaining = _copy(plan)
+            remaining.update(actions=plan["execution_order"][len(saved):],
+                             execution_order=plan["execution_order"][len(saved):],
+                             completed_actions=_copy(saved))
+            remaining["delays"]["action_gaps"] = plan["delays"]["action_gaps"][len(saved):]
+            return remaining
+
+    def fail_device_task(self, physical_device_id: str, log_message: str,
+                         task_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """End the current device attempt even when its phone connection failed."""
+        with self._session(recover=False) as state:
+            device = self.devices.get(state, self.device_id, _utcnow())
+            active = device.get("active_task")
+            if active:
+                if active.get("physical_device_id") != physical_device_id or task_id is not None and active["task_id"] != _task_id(task_id):
+                    raise EngineError("PHYSICAL_DEVICE_MISMATCH", "报错设备与当前活动任务不一致")
+            elif task_id is not None:
+                if device["state"] == "BLOCKED":
+                    return None
+                identity = _task_id(task_id)
+                project = state["project_accounts"].get(identity)
+                entry = project["accounts"].get(self.device_id) if project else None
+                if not entry or entry["status"] != "PENDING" or entry["physical_device_id"] != physical_device_id:
+                    return None
+                now = _utcnow()
+                active = {"task_id": identity, "run_token": uuid.uuid4().hex, "claimed_at": now.isoformat(),
+                          "physical_device_id": physical_device_id, "assignment_id": project["assignment"]["assignment_id"],
+                          "strategy": _copy(entry["plan"]) if entry.get("plan") else None,
+                          "comment_content": entry["comment_content"], "comments": [entry["comment_content"]],
+                          "action_results": _copy(entry.get("resume_actions", []))}
+                device.update(state="BUSY", active_task=active, cooldown_until=None)
+            else:
+                return None
+            return self._finish(state, self.device_id, device, "FAILED", active.get("action_results", []),
+                                "EXECUTION_ERROR", str(log_message)[:8000], device["state"] == "BLOCKED")
+
     def assert_author(self, expected: Any, actual: Any) -> str:
         try:
             return self.authors.assert_author(expected, actual)
@@ -1435,7 +1591,7 @@ class UnifiedGateway:
                 entry["plan"] = _copy(plan)
             state["exports_dirty"] = True
             self._save_state(state)
-            self._flush_exports(state)
+            self._try_flush_exports(state)
             return _copy(plan)
 
     def record_result(self, task_id: Union[str, int], status: str,

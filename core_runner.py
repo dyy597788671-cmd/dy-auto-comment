@@ -160,14 +160,22 @@ def _target_count(value: Any) -> Optional[int]:
     if value is None or value == "":
         return None
     if isinstance(value, bool):
-        raise EngineError("INVALID_TARGET_COUNT", "Target_Device_Count 必须为正整数")
+        raise EngineError("INVALID_TARGET_COUNT", "执行设备数量必须为正整数")
     try:
         text = _text(value)
     except EngineError as exc:
-        raise EngineError("INVALID_TARGET_COUNT", "Target_Device_Count 必须为正整数") from exc
+        raise EngineError("INVALID_TARGET_COUNT", "执行设备数量必须为正整数") from exc
     if not re.fullmatch(r"[1-9]\d*", text):
-        raise EngineError("INVALID_TARGET_COUNT", "Target_Device_Count 必须为正整数")
+        raise EngineError("INVALID_TARGET_COUNT", "执行设备数量必须为正整数")
     return int(text)
+
+
+def _device_count_message(total: int, requested: int) -> str:
+    return f"当前连接设备总数：{total}台；本条设备数量：{requested}台，超过总数，请调整。"
+
+
+def _comment_count_message(total: int, requested: int) -> str:
+    return f"去重后的有效评论数量：{total}条；本条设备数量：{requested}台，评论不足，请补充。"
 
 
 def _connected_devices(values: Any) -> List[Dict[str, str]]:
@@ -397,7 +405,7 @@ class TaskScheduler:
         if isinstance(raw, datetime_time):
             parsed = datetime.combine(now.astimezone().date(), raw)
             return (parsed.replace(tzinfo=self.tz) if parsed.tzinfo is None else parsed).astimezone(timezone.utc)
-        text = _text(raw)
+        text = _text(raw) or "0"
         if re.fullmatch(r"\d{2}:\d{2}(?::\d{2})?", text):
             try:
                 clock_time = datetime_time.fromisoformat(text)
@@ -414,8 +422,6 @@ class TaskScheduler:
                 cache = {"source": text, "due_at": (now + timedelta(minutes=minutes)).isoformat()}
                 state["relative_schedules"][identity] = cache
             return _timestamp(cache["due_at"])
-        if not text:
-            raise EngineError("INVALID_SCHEDULE", "Scheduled_Time 不允许为空")
         try:
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
             if "T" not in text and " " not in text:
@@ -992,7 +998,7 @@ class UnifiedGateway:
             if status != "PENDING":
                 raise EngineError("TASK_NOT_PENDING", "仅允许给新的PENDING项目分配设备")
             if count > len(roster):
-                raise EngineError("TARGET_COUNT_EXCEEDS_CONNECTED", "执行设备数量大于当前实际连接设备数量")
+                raise EngineError("TARGET_COUNT_EXCEEDS_CONNECTED", f"任务{identity}（第{row}行）：" + _device_count_message(len(roster), count))
             eligible = [v for v in roster if state["devices"].get(v["sender_account_id"], {}).get("state") != "BLOCKED"]
             if count > len(eligible):
                 raise EngineError("ELIGIBLE_DEVICES_INSUFFICIENT", "可执行设备不足；被锁定设备不能参与分配")
@@ -1001,7 +1007,7 @@ class UnifiedGateway:
                 if active and active.get("physical_device_id") not in (None, value["device_id"]):
                     raise EngineError("ACCOUNT_DEVICE_CONFLICT", "账号已有任务，不能在执行中更换物理设备")
             if count > len(task["comments"]):
-                raise EngineError("COMMENTS_INSUFFICIENT", "去重后的候选评论数量少于本次执行设备数量")
+                raise EngineError("COMMENTS_INSUFFICIENT", f"任务{identity}（第{row}行）：" + _comment_count_message(len(task["comments"]), count))
             # Validate the schedule before saving a permanent assignment.
             self.scheduler.due_at(identity, sheet.cell(row, columns["Scheduled_Time"]).value, state, _utcnow())
         finally:

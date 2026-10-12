@@ -437,9 +437,12 @@ class TaskScheduler:
             owners = {device["active_task"]["task_id"]
                       for device in state["devices"].values() if device.get("active_task")}
             projects = state["project_accounts"]
+            dispatch = state.get("dispatch")
             candidates: List[Tuple[datetime, int, Dict[str, Any]]] = []
             invalid: List[str] = []
             for identity, row in rows.items():
+                if dispatch is not None and identity != dispatch.get("current_task_id"):
+                    continue
                 status = _text(sheet.cell(row, columns["Status"]).value).upper()
                 project = projects.get(identity)
                 account = project["accounts"].get(device_id) if project else None
@@ -1104,6 +1107,7 @@ class UnifiedGateway:
                             "resume_requires_review": False,
                             "comment_sent": entry.get("comment_sent", False),
                             "executed_actions": _copy(actions),
+                            "previous_error": {k: (entry.get("previous_result") or {}).get(k, "") for k in ("error_code", "log_message", "finished_at")},
                             "planned_actions": plan.get("execution_order", []) if plan else [],
                             "counts": {name: int(name in passed) for name in ACTIONS},
                             "error_code": result.get("error_code", "") if result else "",
@@ -1237,6 +1241,99 @@ class UnifiedGateway:
         except Exception as exc:
             self.logger.exception("gateway_error device_id=%s", self.device_id)
             raise EngineError("ENGINE_ERROR", str(exc)) from exc
+
+    def begin_dispatch(self) -> None:
+        """Called once by a new main-flow run; old unfinished ownership becomes resumable."""
+        with self._session(recover=False) as state:
+            state["dispatch"] = {"current_task_id": None, "skipped_accounts": []}
+            for account, device in state["devices"].items():
+                active = device.get("active_task")
+                if not active:
+                    continue
+                blocked = device["state"] == "BLOCKED"
+                info = device.get("block_info") or {}
+                self._finish(state, account, device, "FAILED", active.get("action_results", []),
+                             "SECURITY_CHALLENGE_DETECTED" if blocked else "EXECUTION_INTERRUPTED",
+                             info.get("log_message", "") if blocked else "上次执行中断，已保留保存的动作进度，可续发。", blocked)
+                if not blocked:
+                    device.update(state="READY", cooldown_until=None)
+                    device["last_result"].update(cooldown_seconds=0, cooldown_until=None, device_state="READY")
+            self._save_state(state)
+
+    def select_dispatch(self, connected_devices: List[Dict[str, str]]) -> Dict[str, Any]:
+        """Select only the next task's currently executable assigned devices."""
+        roster = _connected_devices(connected_devices)
+        with self._session() as state:
+            dispatch = state.setdefault("dispatch", {"current_task_id": None, "skipped_accounts": []})
+            connected = {v["sender_account_id"] for v in roster} - set(dispatch["skipped_accounts"])
+            workbook, sheet, columns, rows, _ = self.scheduler.read()
+            waits, messages = [], []
+            dispatch["issues"] = {}
+            current = dispatch.get("current_task_id")
+            order = ([current] if current in rows else []) + [v for v in rows if v != current]
+            try:
+                for identity in order:
+                    status = _text(sheet.cell(rows[identity], columns["Status"]).value).upper()
+                    project = state["project_accounts"].get(identity)
+                    if not project and status != "PENDING":
+                        continue
+                    try:
+                        allocation_roster = roster if project else [v for v in roster if v["sender_account_id"] in connected]
+                        if not project and len(allocation_roster) < len(roster):
+                            task = self.scheduler.task_from_row(sheet, columns, rows[identity], identity)
+                            count = task["target_device_count"]
+                            if count is not None and count > len(allocation_roster):
+                                raise EngineError("DISPATCH_DEVICES_INSUFFICIENT",
+                                    f"本轮可执行设备数量：{len(allocation_roster)}台；本条设备数量：{count}台，设备不足，任务保留待执行。")
+                        self._allocate_task_locked(state, identity, allocation_roster)
+                        project = state["project_accounts"][identity]
+                        task = self.scheduler.task_from_row(sheet, columns, rows[identity], identity)
+                        if _source_key(task) != project["source_key"]:
+                            raise EngineError("TASK_SOURCE_CHANGED", "已分配任务的作品信息被更改")
+                        now = _utcnow()
+                        due = self.scheduler.due_at(identity, sheet.cell(rows[identity], columns["Scheduled_Time"]).value, state, now)
+                        available, task_waits, pending = [], [], []
+                        for account in project["assignment"]["selected_accounts"]:
+                            if project["accounts"][account]["status"] != "PENDING":
+                                continue
+                            pending.append(account)
+                            if account not in connected:
+                                continue
+                            device = self.devices.get(state, account, now)
+                            if device["state"] not in ("READY", "COOLDOWN"):
+                                continue
+                            seconds = max(0.0, (due - now).total_seconds(),
+                                (_timestamp(device["cooldown_until"]) - now).total_seconds() if device["state"] == "COOLDOWN" else 0.0)
+                            if seconds > 0:
+                                task_waits.append(seconds)
+                            else:
+                                available.append(account)
+                        if available:
+                            dispatch["current_task_id"] = identity
+                            self._save_state(state)
+                            return {"task_id": identity, "accounts": available, "wait_seconds": 0, "messages": messages}
+                        if identity == current and task_waits:
+                            self._save_state(state)
+                            return {"task_id": identity, "accounts": [], "wait_seconds": min(task_waits), "messages": messages}
+                        if identity == current and any(v["status"] == "RUNNING" for v in project["accounts"].values()):
+                            self._save_state(state)
+                            return {"task_id": identity, "accounts": [], "wait_seconds": 0,
+                                    "messages": messages + ["当前条目还有未结束设备，运行记录保留。"]}
+                        waits.extend(task_waits)
+                        if pending and not task_waits:
+                            message = "任务" + identity + "的未完成设备本轮不可执行，记录保留，可续发。"
+                            messages.append(message)
+                            dispatch["issues"][identity] = message
+                    except EngineError as exc:
+                        message = "任务" + identity + "：" + str(exc)
+                        messages.append(message)
+                        dispatch["issues"][identity] = message
+                        self.logger.warning("dispatch_task_unavailable task_id=%s code=%s message=%s", identity, exc.code, exc)
+                dispatch["current_task_id"] = None
+                self._save_state(state)
+                return {"task_id": None, "accounts": [], "wait_seconds": min(waits) if waits else 0, "messages": messages}
+            finally:
+                workbook.close()
 
     @staticmethod
     def _actions(values: Any) -> List[Dict[str, str]]:
@@ -1376,6 +1473,9 @@ class UnifiedGateway:
                                   " 没有未分配评论，请先补充Comments")
             task["comment_content"] = entry["comment_content"] if assignment else secrets.choice(available)
             active = self.devices.claim(device, task, now)
+            # The web intake reads this process identity; it never controls it.
+            import lan_bridge
+            active.update(owner_pid=os.getpid(), owner_stamp=lan_bridge.process_stamp(os.getpid()))
             if entry and entry.get("resume_actions"):
                 active["action_results"] = _copy(entry["resume_actions"])
             if entry and entry.get("plan"):
@@ -1459,56 +1559,59 @@ class UnifiedGateway:
         """Queue unfinished assigned devices, preserving their original plan and confirmations."""
         identity = _task_id(task_id)
         with self._session(recover=False) as state:
-            project = state["project_accounts"].get(identity)
-            if not project or not project.get("assignment"):
-                raise EngineError("PROJECT_NOT_ALLOCATED", "此任务尚未分配设备，按原流程执行即可")
-            entries = project["accounts"]
-            if sender_account_id is not None and sender_account_id not in entries:
-                raise EngineError("NOT_FOUND", "此设备不属于该任务")
-            accounts = [sender_account_id] if sender_account_id is not None else list(entries)
-            resumed = []
-            for account in accounts:
-                entry = entries[account]
-                if entry["status"] in ("SUCCESS", "NOT_FOUND"):
-                    continue
-                device = state["devices"].get(account, {})
-                if device.get("state") == "BLOCKED":
-                    if sender_account_id is not None:
-                        raise EngineError("DEVICE_UNAVAILABLE", "该设备仍处于原有熔断状态，请先按原方式处理")
-                    continue
-                active = device.get("active_task")
-                active = active if active and active["task_id"] == identity else None
-                if active and not allow_active:
-                    if sender_account_id is not None:
-                        raise EngineError("STOP_REQUIRED", "该设备存在运行任务，仅B本机停止影刀后可续接中断记录")
-                    continue
-                if entry["status"] == "PENDING":
-                    resumed.append(account)
-                    continue
-                actions = self._actions(self._entry_actions(state, identity, account))
-                saved = []
-                for action in actions:
-                    if action["status"] not in ("PASSED", "SKIPPED_ALREADY_ACTIVE"):
-                        break
-                    saved.append(action)
-                plan = (active.get("strategy") if active else None) or entry.get("plan")
-                if saved and (not plan or [v["action"] for v in saved] != plan["execution_order"][:len(saved)]):
-                    raise EngineError("ACTION_ORDER_CONFLICT", "已保存动作与原计划不一致，未更改续发记录")
-                if entry.get("result"):
-                    entry["previous_result"] = _copy(entry["result"])
-                entry.update(status="PENDING", result=None, run_token=None, claimed_at=None,
-                             resume_actions=saved,
-                             comment_sent=any(v["action"] == "Comment" and v["status"] == "PASSED" for v in saved))
-                if plan:
-                    entry["plan"] = _copy(plan)
-                if active:
-                    device.update(state="READY", active_task=None, cooldown_until=None)
+            return self._request_resume_locked(state, identity, sender_account_id, allow_active)
+
+    def _request_resume_locked(self, state, identity, sender_account_id=None, allow_active=False):
+        project = state["project_accounts"].get(identity)
+        if not project or not project.get("assignment"):
+            raise EngineError("PROJECT_NOT_ALLOCATED", "此任务尚未分配设备，按原流程执行即可")
+        entries = project["accounts"]
+        if sender_account_id is not None and sender_account_id not in entries:
+            raise EngineError("NOT_FOUND", "此设备不属于该任务")
+        accounts = [sender_account_id] if sender_account_id is not None else list(entries)
+        resumed = []
+        for account in accounts:
+            entry = entries[account]
+            if entry["status"] in ("SUCCESS", "NOT_FOUND"):
+                continue
+            device = state["devices"].get(account, {})
+            if device.get("state") == "BLOCKED":
+                if sender_account_id is not None:
+                    raise EngineError("DEVICE_UNAVAILABLE", "该设备仍处于原有熔断状态，请先按原方式处理")
+                continue
+            active = device.get("active_task")
+            active = active if active and active["task_id"] == identity else None
+            if active and not allow_active:
+                if sender_account_id is not None:
+                    raise EngineError("STOP_REQUIRED", "该设备存在运行任务，仅B本机停止影刀后可续接中断记录")
+                continue
+            if entry["status"] == "PENDING":
                 resumed.append(account)
-            if not resumed:
-                raise EngineError("NOTHING_TO_RESUME", "没有可续发的未完成设备；已成功设备不会重做")
-            self._sync_project(state, identity)
-            return {"task_id": identity, "resumed_accounts": resumed,
-                    "progress": self._project_progress(state, identity)}
+                continue
+            actions = self._actions(self._entry_actions(state, identity, account))
+            saved = []
+            for action in actions:
+                if action["status"] not in ("PASSED", "SKIPPED_ALREADY_ACTIVE"):
+                    break
+                saved.append(action)
+            plan = (active.get("strategy") if active else None) or entry.get("plan")
+            if saved and (not plan or [v["action"] for v in saved] != plan["execution_order"][:len(saved)]):
+                raise EngineError("ACTION_ORDER_CONFLICT", "已保存动作与原计划不一致，未更改续发记录")
+            if entry.get("result"):
+                entry["previous_result"] = _copy(entry["result"])
+            entry.update(status="PENDING", result=None, run_token=None, claimed_at=None,
+                         resume_actions=saved,
+                         comment_sent=any(v["action"] == "Comment" and v["status"] == "PASSED" for v in saved))
+            if plan:
+                entry["plan"] = _copy(plan)
+            if active:
+                device.update(state="READY", active_task=None, cooldown_until=None)
+            resumed.append(account)
+        if not resumed:
+            raise EngineError("NOTHING_TO_RESUME", "没有可续发的未完成设备；已成功设备不会重做")
+        self._sync_project(state, identity)
+        return {"task_id": identity, "resumed_accounts": resumed,
+                "progress": self._project_progress(state, identity)}
 
     def remaining_strategy(self, task_id: str, run_token: str) -> Dict[str, Any]:
         """Return only remaining steps; the persisted strategy remains complete."""
@@ -1551,8 +1654,12 @@ class UnifiedGateway:
                 device.update(state="BUSY", active_task=active, cooldown_until=None)
             else:
                 return None
-            return self._finish(state, self.device_id, device, "FAILED", active.get("action_results", []),
-                                "EXECUTION_ERROR", str(log_message)[:8000], device["state"] == "BLOCKED")
+            result = self._finish(state, self.device_id, device, "FAILED", active.get("action_results", []),
+                                  "EXECUTION_ERROR", str(log_message)[:8000], device["state"] == "BLOCKED")
+            if "dispatch" in state and self.device_id not in state["dispatch"]["skipped_accounts"]:
+                state["dispatch"]["skipped_accounts"].append(self.device_id)
+                self._save_state(state)
+            return result
 
     def assert_author(self, expected: Any, actual: Any) -> str:
         try:

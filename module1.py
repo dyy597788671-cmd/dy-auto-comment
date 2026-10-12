@@ -1,6 +1,6 @@
 import sys
 
-PROJECT_ROOT = r"D:\备份文件\项目库\抖音自动发布工具"
+PROJECT_ROOT = str(__import__("pathlib").Path(__file__).resolve().parent.parent)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
@@ -50,6 +50,7 @@ def _allocation_wait_seconds(gateway):
             raise core_runner.EngineError("DEVICE_NOT_READY", "当前设备状态：" + device["state"])
         pending = [identity for identity, project in state["project_accounts"].items()
                    if project.get("assignment") and
+                   ("dispatch" not in state or identity == state["dispatch"].get("current_task_id")) and
                    project["accounts"].get(gateway.device_id, {}).get("status") == "PENDING"]
         if not pending:
             gateway._save_state(state)
@@ -70,38 +71,43 @@ def _allocation_wait_seconds(gateway):
             workbook.close()
 
 
-def prepare_devices(connection_infos):
-    """读取影刀实际连接详情，沿用现有分配器；不生成第二套任务清单。"""
-    if not isinstance(connection_infos, list) or not connection_infos:
+def _device_bindings(connection_infos):
+    if not isinstance(connection_infos, list):
         raise ValueError("connection_infos需要当前实际连接的手机详情列表")
-    bindings = [{"device_id": info["udid"], "sender_account_id": "设备_" + info["udid"],
-                 "connection_index": index} for index, info in enumerate(connection_infos)]
-    roster = core_runner._connected_devices(bindings)
-    gateway = core_runner.UnifiedGateway(PROJECT_ROOT, roster[0]["sender_account_id"])
+    return [{"device_id": info["udid"], "sender_account_id": "设备_" + info["udid"],
+             "connection_index": index} for index, info in enumerate(connection_infos)]
+
+
+def start_execution(connection_infos):
+    """Once per main-flow start; does not connect or operate a phone."""
+    bindings = _device_bindings(connection_infos)
+    gateway = core_runner.UnifiedGateway(PROJECT_ROOT, bindings[0]["sender_account_id"] if bindings else "web-tool")
+    gateway.begin_dispatch()
     import lan_bridge
-    lan_bridge.prepare(gateway, roster)
-    workbook, sheet, columns, rows, _ = gateway.scheduler.read()
-    try:
-        task_ids = []
-        for identity, row in rows.items():
-            status = core_runner._text(sheet.cell(row, columns["Status"]).value).upper()
-            if status not in ("PENDING", "RUNNING"):
-                continue
-            count = (sheet.cell(row, columns["Target_Device_Count"]).value
-                     if "Target_Device_Count" in columns else None)
-            if count in (None, ""):
-                raise core_runner.EngineError("TARGET_COUNT_REQUIRED", "任务" + identity + "未填写执行设备数量")
-            task_ids.append(identity)
-    finally:
-        workbook.close()
-    for identity in task_ids:
-        gateway.allocate_task(identity, roster)
-    with gateway._session() as state:
-        # RUNNING也要显式交给原领取入口报告；不能静默当作没有任务。
-        accounts = {account for project in state["project_accounts"].values()
-                    if project.get("assignment") for account, entry in project["accounts"].items()
-                    if entry["status"] in ("PENDING", "RUNNING")}
-        return lan_bridge.worker_bindings(gateway, bindings, accounts)
+    if bindings:
+        lan_bridge.prepare(gateway, core_runner._connected_devices(bindings))
+    return bindings
+
+
+def prepare_devices(connection_infos):
+    """Each outer-loop iteration returns this task's devices only."""
+    bindings = _device_bindings(connection_infos)
+    if not bindings:
+        print("当前连接设备总数：0台，没有可执行设备；任务保留。")
+        return []
+    gateway = core_runner.UnifiedGateway(PROJECT_ROOT, bindings[0]["sender_account_id"])
+    roster = core_runner._connected_devices(bindings)
+    while True:
+        selection = gateway.select_dispatch(roster)
+        for message in selection["messages"]:
+            print(message)
+        if selection["accounts"]:
+            return [dict(binding, task_id=selection["task_id"]) for binding in bindings
+                    if binding["sender_account_id"] in selection["accounts"]]
+        if selection["wait_seconds"] <= 0:
+            return []
+        import time
+        time.sleep(min(30.0, selection["wait_seconds"]))
 
 
 def allocate_task(task_id, connected_devices):

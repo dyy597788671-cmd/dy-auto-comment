@@ -1,103 +1,85 @@
-"""Patch only known intake boundaries; preserve the installed B module root."""
+"""Matched upgrade; preserve B's module prefix and all business data."""
 import argparse
 import ast
-import shutil
-import textwrap
-from datetime import datetime
+import os
 from pathlib import Path
 
-MARKER = "# LAN_TOOL_INTAKE_V1"
+VERSION = '1.1.0'
+FUNCTIONS = ('read_task', '_allocation_wait_seconds', 'prepare_interactions',
+             '_device_bindings', 'start_execution', 'prepare_devices', 'finish_device_error')
 
 
-def patch_core(source):
-    if MARKER in source:
-        return source
-    tree = ast.parse(source)
-    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "UnifiedGateway")
-    functions = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
-    allocate = functions["allocate_task"]
-    block = allocate.body[-1]
-    expression = block.items[0].context_expr if isinstance(block, ast.With) else None
-    if not isinstance(expression, ast.Call) or not isinstance(expression.func, ast.Attribute) or expression.func.attr != "_session":
-        raise RuntimeError("设备分配函数与已核对版本不同，未修改")
-    lines = source.splitlines(keepends=True)
-    body = "".join(lines[block.body[0].lineno - 1:block.end_lineno])
-    # Copy the existing allocation algorithm byte for byte, reducing one indent.
-    body = "".join(line[4:] if line.startswith("    ") else line for line in body.splitlines(keepends=True))
-    replacement = "        with self._session() as state:\n            return self._allocate_task_locked(state, identity, roster)\n\n    def _allocate_task_locked(self, state, identity, roster):\n        " + MARKER + "\n        configured = self.settings[\"sender_accounts\"]\n        if configured and any(v[\"sender_account_id\"] not in configured for v in roster):\n            raise EngineError(\"ACCOUNT_NOT_CONFIGURED\", \"连接名单含未登记的执行账号\")\n" + body
-    lines[block.lineno - 1:block.end_lineno] = [replacement]
-    source = "".join(lines)
-    old = "                state = self._load_state()\n                if recover:"
-    new = "                state = self._load_state()\n                if state.get(\"web_cleanup_transaction\"):\n                    import lan_bridge\n                    lan_bridge.recover_cleanup(self, state)\n                if recover:"
-    if source.count(old) != 1:
-        raise RuntimeError("项目锁入口与已核对版本不同，未修改")
-    source = source.replace(old, new)
-    old = "        state[\"exports_dirty\"] = False\n        self._save_state(state)"
-    new = old + "\n        try:\n            import lan_bridge\n            lan_bridge.snapshot(self, state)\n        except ImportError:\n            pass"
-    if source.count(old) != 1:
-        raise RuntimeError("执行结果输出入口与已核对版本不同，未修改")
-    source = source.replace(old, new)
-    ast.parse(source)
-    return source
+def patch_module(source, template):
+    original, target = ast.parse(source), ast.parse(template)
+    existing = {n.name: n for n in original.body if isinstance(n, ast.FunctionDef)}
+    updates = {n.name: n for n in target.body if isinstance(n, ast.FunctionDef)}
+    required = {'read_task', 'prepare_devices', 'prepare_interactions',
+                'record_action_result', 'finish_task', '_save_execution_error'}
+    if not required.issubset(existing):
+        raise RuntimeError('当前module1缺少已核对的接口，尚未修改项目。')
+    source_lines, target_lines = source.splitlines(keepends=True), template.splitlines(keepends=True)
+    replacements, additions = [], []
+    for name in FUNCTIONS:
+        fn = updates[name]
+        body = ''.join(target_lines[fn.lineno - 1:fn.end_lineno]).rstrip() + '\n'
+        if name in existing:
+            old = existing[name]
+            replacements.append((old.lineno - 1, old.end_lineno, body))
+        else:
+            additions.append(body)
+    for begin, end, body in sorted(replacements, reverse=True):
+        source_lines[begin:end] = [body]
+    result = ''.join(source_lines)
+    if additions:
+        result = result.rstrip() + '\n\n\n' + '\n\n'.join(additions)
+    ast.parse(result)
+    return result
 
 
-def patch_module(source):
-    if MARKER in source:
-        return source
-    # Match the actual established API instead of replacing the whole module.
-    tree = ast.parse(source)
-    names = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
-    if not {"read_task", "prepare_devices", "finish_task"}.issubset(names):
-        raise RuntimeError("当前module1缺少已核对的接口，未修改")
-    changes = {
-        "    task = gateway.get_active_task(physical_device_id=physical_device_id)":
-        "    import lan_bridge\n    lan_bridge.before_read(gateway)\n    task = gateway.get_active_task(physical_device_id=physical_device_id)",
-        "        task = gateway.get_next_task(physical_device_id=physical_device_id)":
-        "        lan_bridge.before_read(gateway)\n        task = gateway.get_next_task(physical_device_id=physical_device_id)",
-        "    gateway = core_runner.UnifiedGateway(PROJECT_ROOT, roster[0][\"sender_account_id\"])\n    workbook, sheet, columns, rows, _ = gateway.scheduler.read()":
-        "    gateway = core_runner.UnifiedGateway(PROJECT_ROOT, roster[0][\"sender_account_id\"])\n    import lan_bridge\n    lan_bridge.prepare(gateway, roster)\n    workbook, sheet, columns, rows, _ = gateway.scheduler.read()",
-        "        return [dict(binding) for binding in bindings if binding[\"sender_account_id\"] in accounts]":
-        "        return lan_bridge.worker_bindings(gateway, bindings, accounts)",
-    }
-    for old, new in changes.items():
-        if source.count(old) != 1:
-            raise RuntimeError("当前module1接入位置与已核对版本不同，未修改")
-        source = source.replace(old, new)
-    source += "\n" + MARKER + "\n"
-    ast.parse(source)
-    return source
-
-
-def install(root, package):
+def candidates(root, package):
     root, package = Path(root).resolve(), Path(package).resolve()
-    core_path, module_path = root / "core_runner.py", root / "xbot_robot" / "module1.py"
-    for path in (core_path, module_path, root / "data" / "task_cases.xlsx"):
+    module = root / 'xbot_robot/module1.py'
+    for path in (root / 'core_runner.py', module, root / 'data/task_cases.xlsx'):
         if not path.is_file():
-            raise RuntimeError("缺少B项目文件：" + str(path))
-    original_core = core_path.read_text(encoding="utf-8-sig")
-    original_module = module_path.read_text(encoding="utf-8-sig")
-    new_core, new_module = patch_core(original_core), patch_module(original_module)
-    backup = root / "tool-backups" / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    backup.mkdir(parents=True)
-    for path in (core_path, module_path, root / "lan_bridge.py"):
-        if path.exists():
-            shutil.copy2(path, backup / path.name)
-    try:
-        shutil.copy2(package / "lan_bridge.py", root / "lan_bridge.py")
-        shutil.copytree(package / "lan_tool", root / "lan_tool", dirs_exist_ok=True)
-        core_path.write_text(new_core, encoding="utf-8")
-        module_path.write_text(new_module, encoding="utf-8")
-    except Exception:
-        for path in (core_path, module_path):
-            shutil.copy2(backup / path.name, path)
-        raise
-    print("BACKUP=" + str(backup))
-    print("RESULT=TOOL_INSTALLED")
+            raise RuntimeError('缺少B项目文件：' + str(path))
+    core = (package / 'core_runner.py').read_text(encoding='utf-8-sig')
+    bridge = (package / 'lan_bridge.py').read_text(encoding='utf-8-sig')
+    patched = patch_module(module.read_text(encoding='utf-8-sig'),
+                           (package / 'module1.py').read_text(encoding='utf-8-sig'))
+    for source in (core, bridge, patched):
+        ast.parse(source)
+    values = {root / 'core_runner.py': core.encode('utf-8'),
+              root / 'lan_bridge.py': bridge.encode('utf-8'), module: patched.encode('utf-8')}
+    for path in sorted((package / 'lan_tool').rglob('*')):
+        if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc':
+            values[root / 'lan_tool' / path.relative_to(package / 'lan_tool')] = path.read_bytes()
+    return values
 
 
-if __name__ == "__main__":
+def install(root, package, check=False):
+    values = candidates(root, package)
+    changes = {p: data for p, data in values.items() if not p.is_file() or p.read_bytes() != data}
+    if check:
+        print('RESULT=' + ('UPDATE_REQUIRED' if changes else 'ALREADY_CURRENT'))
+        return bool(changes)
+    for path, data in changes.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + '.install-tmp')
+        try:
+            temporary.write_bytes(data)
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+    print('VERSION=' + VERSION)
+    print('RESULT=' + ('TOOL_UPDATED' if changes else 'ALREADY_CURRENT'))
+    return bool(changes)
+
+
+if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", required=True)
-    parser.add_argument("--package", default=str(Path(__file__).parent))
+    parser.add_argument('--root', required=True)
+    parser.add_argument('--package', default=str(Path(__file__).parent))
+    parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
-    install(args.root, args.package)
+    install(args.root, args.package, args.check)

@@ -124,7 +124,7 @@ class Handler(BaseHTTPRequestHandler):
         message = str(exc) if self._admin() or code in ("INVALID_INPUT", "COMMENTS_EMPTY", "COMMENTS_INSUFFICIENT", "INVALID_CONTENT_TYPE", "INVALID_TARGET_COUNT", "INVALID_SCHEDULE", "TARGET_COUNT_EXCEEDS_CONNECTED", "DEVICE_STATUS_UNAVAILABLE", "NOT_FOUND", "ACCESS_DENIED", "STOP_REQUIRED", "NOT_AN_ERROR", "NOTHING_TO_RESUME", "PROJECT_NOT_ALLOCATED", "DEVICE_UNAVAILABLE") else "当前操作未完成，请联系B电脑处理；你的提交和历史仍保留"
         result = {"ok": False, "error_code": code, "message": message}
         count = getattr(exc, "connected_device_count", None)
-        if code == "TARGET_COUNT_EXCEEDS_CONNECTED" and isinstance(count, int):
+        if isinstance(count, int):
             result["connected_device_count"] = count
         self._json(result, status, cookie)
 

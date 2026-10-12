@@ -25,8 +25,6 @@ def read_task(sender_account_id="手机01", adopt_legacy=False, physical_device_
             raise RuntimeError("该账号仍有旧模式活动任务，请先核对处理，不能混入新的随机分配")
         if task.get("assignment_id") and not resume_active:
             raise RuntimeError("该账号的分配任务已领取；不能重复启动。明确核对后才允许恢复")
-        if task.get("strategy") is not None:
-            raise RuntimeError("已有互动策略，请先核对执行进度再恢复")
         return task
 
     if wait_for_task and not physical_device_id:
@@ -157,7 +155,7 @@ def prepare_interactions(task_data):
         root=PROJECT_ROOT,
         device_id=task_data["sender_account_id"]
     )
-    plan = gateway.generate_strategy(task_id=task_id, run_token=run_token)
+    plan = gateway.remaining_strategy(task_id=task_id, run_token=run_token)
     plan["content_type"] = content_type
     return plan
 
@@ -236,6 +234,19 @@ def finish_task(task_data, executed_actions, status="SUCCESS",
 
 def main(args=None):
     return read_task()
+
+
+def finish_device_error(sender_account_id, physical_device_id, log_message, task_id=None):
+    """Main-flow Catch entry; no dependency on a child flow's task_data variable."""
+    try:
+        gateway = core_runner.UnifiedGateway(PROJECT_ROOT, sender_account_id)
+        result = gateway.fail_device_task(physical_device_id, log_message, task_id)
+        if result is not None:
+            _save_execution_error(result, result["executed_actions"], "EXECUTION_ERROR", str(log_message))
+        return {"released": result is not None, "result": result}
+    except Exception as exc:
+        print("设备异常：" + str(log_message) + "；异常结束未完成：" + str(exc))
+        return {"released": False, "error": str(exc), "original_error": str(log_message)}
 
 
 def build_author_cover_xpath(expected_author, occurrence=1):

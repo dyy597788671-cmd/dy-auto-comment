@@ -103,8 +103,12 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, exc, cookie):
         code = getattr(exc, "code", "TOOL_ERROR")
         status = 404 if code == "NOT_FOUND" else 403 if code == "ACCESS_DENIED" else 409 if code in ("STOP_REQUIRED", "EXECUTION_STILL_RUNNING", "NOT_AN_ERROR", "LOCK_TIMEOUT", "EXCEL_IO_FAILED", "CLEANUP_PENDING") else 400
-        message = str(exc) if self._admin() or code in ("INVALID_INPUT", "COMMENTS_INSUFFICIENT", "INVALID_CONTENT_TYPE", "INVALID_TARGET_COUNT", "INVALID_SCHEDULE", "NOT_FOUND", "ACCESS_DENIED", "STOP_REQUIRED", "NOT_AN_ERROR") else "当前操作未完成，请联系B电脑处理；你的提交和历史仍保留"
-        self._json({"ok": False, "error_code": code, "message": message}, status, cookie)
+        message = str(exc) if self._admin() or code in ("INVALID_INPUT", "COMMENTS_EMPTY", "COMMENTS_INSUFFICIENT", "INVALID_CONTENT_TYPE", "INVALID_TARGET_COUNT", "INVALID_SCHEDULE", "TARGET_COUNT_EXCEEDS_CONNECTED", "DEVICE_STATUS_UNAVAILABLE", "NOT_FOUND", "ACCESS_DENIED", "STOP_REQUIRED", "NOT_AN_ERROR") else "当前操作未完成，请联系B电脑处理；你的提交和历史仍保留"
+        result = {"ok": False, "error_code": code, "message": message}
+        count = getattr(exc, "connected_device_count", None)
+        if code == "TARGET_COUNT_EXCEEDS_CONNECTED" and isinstance(count, int):
+            result["connected_device_count"] = count
+        self._json(result, status, cookie)
 
     def do_GET(self):
         cookie = None
@@ -114,9 +118,14 @@ class Handler(BaseHTTPRequestHandler):
             route = urlsplit(self.path).path
             admin = self._admin()
             if route == "/api/context":
-                self._json({"ok": True, "data": {"application": "douyin-local-tool", "admin": admin, "csrf": self._signature("csrf:" + owner),
-                            "lan_url": "http://" + self.server.lan_ip + ":" + str(self.server.server_port),
-                            "version": bridge.VERSION}}, cookie=cookie)
+                data = {"application": "douyin-local-tool", "admin": admin, "csrf": self._signature("csrf:" + owner),
+                        "lan_url": "http://" + self.server.lan_ip + ":" + str(self.server.server_port), "version": bridge.VERSION}
+                try:
+                    data["connected_device_count"] = bridge.connected_device_count()
+                except core.EngineError as exc:
+                    # Startup health and history remain available before the phone manager opens.
+                    data.update(connected_device_count=None, device_status_message=str(exc))
+                self._json({"ok": True, "data": data}, cookie=cookie)
             elif route == "/api/tasks":
                 self._json({"ok": True, "data": bridge.records(self.server.root, owner, admin)}, cookie=cookie)
             elif route.startswith("/api/task/"):
@@ -153,8 +162,9 @@ class Handler(BaseHTTPRequestHandler):
             values = json.loads(self.rfile.read(length))
             route = urlsplit(self.path).path
             if route == "/api/tasks":
-                identity = bridge.submit(self.server.root, owner, self.client_address[0], values)
-                self._json({"ok": True, "data": {"task_id": identity, "message": "提交已保存，将在影刀条目边界接入执行"}}, 201, cookie)
+                result = bridge.submit(self.server.root, owner, self.client_address[0], values, return_details=True)
+                result["message"] = "提交已保存，将在影刀条目边界接入执行"
+                self._json({"ok": True, "data": result}, 201, cookie)
             elif route.startswith("/api/cleanup/"):
                 if not isinstance(values, dict) or set(values) - {"stopped"} or not isinstance(values.get("stopped", False), bool):
                     raise core.EngineError("INVALID_INPUT", "清理参数不正确")

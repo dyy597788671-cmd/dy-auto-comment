@@ -147,28 +147,31 @@ if (-not $python) {
     else { Write-Host '未发现Python可执行文件。' }
     throw 'Python检查未通过，尚未安装或修改项目。请发送上方实际检查结果。'
 }
-$installed = (Test-Path -LiteralPath (Join-Path $root 'lan_tool\server.py')) -and
-    ((Get-Content -LiteralPath $module -Raw -Encoding UTF8) -match 'LAN_TOOL_INTAKE_V1') -and
-    ((Get-Content -LiteralPath $engine -Raw -Encoding UTF8) -match 'LAN_TOOL_INTAKE_V1')
-if (-not $installed) {
+$checkOutput = & $python (Join-Path $package 'install_tool.py') --root $root --package $package --check
+if ($LASTEXITCODE -ne 0) { throw '升级前核对未通过，尚未修改项目。请保留上方原始报错。' }
+$needsUpdate = @($checkOutput | Where-Object { $_ -eq 'RESULT=UPDATE_REQUIRED' }).Count -gt 0
+if ($needsUpdate) {
     if (Get-Process -Name 'ShadowBot.Shell' -ErrorAction SilentlyContinue) {
-        throw '首次安装需要完全退出影刀。退出后重新双击 Start-Tool.cmd；不要删除任务表或运行状态。'
+        throw '升级需要完全退出影刀。退出后重新双击Start-Tool.cmd；任务表和运行记录直接保留。'
     }
-    Write-Host '正在安装工具与必要的数据接入位置……'
-    $output = & $python (Join-Path $package 'install_tool.py') --root $root --package $package
-    $output | ForEach-Object { Write-Host $_ }
-    if ($LASTEXITCODE -ne 0) { throw '工具安装未完成，原业务文件保留。' }
-    $backupLine = @($output | Where-Object { $_ -like 'BACKUP=*' })[-1]
-    $backupPath = $backupLine.Substring(7)
-    try {
-        & (Join-Path $root 'lan_tool\repair_signature.ps1') -ProjectRoot (Join-Path $root 'xbot_robot') -RuntimePath $RuntimePath -Write
-        if ($LASTEXITCODE -ne 0) { throw '签名检查未成功。' }
-    } catch {
-        Copy-Item -LiteralPath (Join-Path $backupPath 'module1.py') -Destination $module -Force
-        Copy-Item -LiteralPath (Join-Path $backupPath 'core_runner.py') -Destination $engine -Force
-        throw ('安装未完成，已还原原模块和引擎。原因：' + $_.Exception.Message)
+    $existingContext = Get-ToolContext ('http://127.0.0.1:' + $Port)
+    if ($existingContext -and $existingContext.data.application -eq 'douyin-local-tool') {
+        throw '请关闭B电脑原工具后台窗口，再双击本包Start-Tool.cmd完成升级。'
     }
-    Write-Host '安装完成。可以重新打开影刀，继续使用原主流程。' -ForegroundColor Green
+    Write-Host '正在更新工具和续发接口……'
+    & $python (Join-Path $package 'install_tool.py') --root $root --package $package
+    if ($LASTEXITCODE -ne 0) { throw '升级尚未完成。请保留上方原始报错，重新运行本包可继续安装。' }
+}
+# Check on every launch: an interrupted prior installation must not skip signing.
+# This uses the same native Runtime methods already verified on B.
+if (Get-Process -Name 'ShadowBot.Shell' -ErrorAction SilentlyContinue) {
+    if ($needsUpdate) { throw '签名处理前需要完全退出影刀。' }
+} else {
+    & (Join-Path $root 'lan_tool\repair_signature.ps1') -ProjectRoot (Join-Path $root 'xbot_robot') -RuntimePath $RuntimePath -Write
+    if ($LASTEXITCODE -ne 0) { throw '签名检查未成功，请保留原始报错；尚未启动网页。' }
+}
+if ($needsUpdate) {
+    Write-Host '代码更新完成。接下来配置影刀配套卡片，全部接齐后再运行主流程。' -ForegroundColor Green
 }
 
 $ruleName = 'DouyinLocalTool_' + $Port
@@ -193,7 +196,7 @@ $localUrl = 'http://127.0.0.1:' + $Port
 $context = Get-ToolContext $localUrl
 if ($context -and $context.data.application -eq 'douyin-local-tool') {
     $lanContext = Get-ToolContext $lanUrl
-    if ($context.data.lan_url -ne $lanUrl -or -not $lanContext -or $lanContext.data.application -ne 'douyin-local-tool') {
+    if ($context.data.version -ne '1.1.0' -or $context.data.lan_url -ne $lanUrl -or -not $lanContext -or $lanContext.data.application -ne 'douyin-local-tool') {
         throw ('端口' + $Port + '已有旧配置的工具在运行。请关闭B电脑原工具后台窗口，再启动；本次实际地址为：' + $lanUrl)
     }
     Write-Host ('已核实网页服务正在运行。其他电脑访问：' + $lanUrl) -ForegroundColor Green
@@ -221,7 +224,7 @@ try {
         $context = Get-ToolContext $localUrl
         $lanContext = Get-ToolContext $lanUrl
         if ($context -and $lanContext -and $context.data.application -eq 'douyin-local-tool' -and
-            $context.data.lan_url -eq $lanUrl -and $lanContext.data.application -eq 'douyin-local-tool' -and
+            $context.data.version -eq '1.1.0' -and $context.data.lan_url -eq $lanUrl -and $lanContext.data.application -eq 'douyin-local-tool' -and
             -not $serverProcess.HasExited) {
             $ready = $true
             break

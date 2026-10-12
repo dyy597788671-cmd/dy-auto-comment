@@ -1,7 +1,8 @@
 """Local web intake and cleanup. Mobile control remains in ShadowBot.
 
 The existing project lock protects Excel, runtime state and this one SQLite
-record file. Only ShadowBot's calls supply the actual connected-device roster.
+record file. Device counts read ShadowBot's existing status; allocation still
+uses the actual connected-device roster supplied by ShadowBot's flow.
 """
 from __future__ import annotations
 
@@ -74,6 +75,35 @@ def gateway_for(root):
     return core.UnifiedGateway(str(root), configured[0] if configured else "web-tool")
 
 
+def connected_device_count():
+    """Read ShadowBot's own status file on demand; never connect a phone."""
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    message = "无法读取影刀当前设备状态，请确认B电脑的影刀手机管理器已打开。"
+    if not local_app_data:
+        raise core.EngineError("DEVICE_STATUS_UNAVAILABLE", message)
+    path = Path(local_app_data) / "ShadowBot" / "mobile_device_connects.json"
+    try:
+        values = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(values, list):
+            raise ValueError("设备状态须为列表")
+        devices = set()
+        for value in values:
+            if not isinstance(value, dict):
+                raise ValueError("设备状态项格式不正确")
+            if value.get("PlatformName") != "Android":
+                continue
+            if not isinstance(value.get("IsConnected"), bool):
+                raise ValueError("缺少设备连接状态")
+            if value["IsConnected"]:
+                identity = value.get("Udid")
+                if not isinstance(identity, str) or not identity.strip():
+                    raise ValueError("已连接设备缺少标识")
+                devices.add(identity.strip())
+        return len(devices)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise core.EngineError("DEVICE_STATUS_UNAVAILABLE", message) from exc
+
+
 def validate_payload(values, gateway):
     allowed = {"keyword", "expected_author", "expected_douyin_id", "content_type",
                "comments", "target_device_count", "scheduled_time"}
@@ -100,9 +130,11 @@ def validate_payload(values, gateway):
     if count is None:
         raise core.EngineError("INVALID_INPUT", "请填写执行设备数量")
     if len(pool) < count:
-        raise core.EngineError("COMMENTS_INSUFFICIENT", "去重后的评论数量必须不少于执行设备数量")
+        raise core.EngineError("COMMENTS_INSUFFICIENT", core._comment_count_message(len(pool), count))
     result.update(comments="\n".join(pool), target_device_count=count)
     scheduled = values.get("scheduled_time", "0")
+    if scheduled is None or isinstance(scheduled, str) and not scheduled.strip():
+        scheduled = "0"
     if isinstance(scheduled, bool) or not isinstance(scheduled, (str, int, float)):
         raise core.EngineError("INVALID_INPUT", "执行时间格式不正确")
     gateway.scheduler.due_at("validation", scheduled, {"relative_schedules": {}}, core._utcnow())
@@ -110,9 +142,15 @@ def validate_payload(values, gateway):
     return result
 
 
-def submit(root, owner, source_ip, values):
+def submit(root, owner, source_ip, values, return_details=False):
     gateway = gateway_for(root)
     payload = validate_payload(values, gateway)
+    connected_count = connected_device_count()
+    requested = payload["target_device_count"]
+    if requested > connected_count:
+        error = core.EngineError("TARGET_COUNT_EXCEEDS_CONNECTED", core._device_count_message(connected_count, requested))
+        error.connected_device_count = connected_count
+        raise error
     identity = "W" + core._utcnow().astimezone(gateway.scheduler.tz).strftime("%Y%m%d%H%M%S") + "_" + secrets.token_hex(8)
     # Intake only; this does not write Excel or change an executing allocation.
     with core._project_lock(gateway.lock_path, gateway.settings["lock_timeout_seconds"]):
@@ -120,7 +158,7 @@ def submit(root, owner, source_ip, values):
             store.db.execute("INSERT INTO records(task_id,owner,payload,submitted_at,source_ip) VALUES (?,?,?,?,?)",
                              (identity, owner, core._json(payload), core._utcnow().isoformat(), source_ip))
             store.db.commit()
-    return identity
+    return {"task_id": identity, "connected_device_count": connected_count} if return_details else identity
 
 
 def read_book(gateway):

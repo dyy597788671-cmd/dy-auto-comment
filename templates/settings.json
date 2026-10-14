@@ -1,0 +1,4 @@
+{
+  "cooldown_min_seconds": 300,
+  "cooldown_max_seconds": 600
+}

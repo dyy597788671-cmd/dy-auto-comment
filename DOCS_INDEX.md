@@ -4,7 +4,8 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| [设备统一执行记录](DEVICE_STANDARDIZATION_20261022.md) | 2026-10-22三大设备任务、APK提取/分发、保留数据回退命令、当前暂停点及后续设备复用 |
+| [手机执行需求](MOBILE_EXECUTION_REQUIREMENTS.md) | 已确认的集中定位、子流程压缩、双开自动识别与独立执行需求；区分确认目标和未实现事项 |
+| [设备统一执行记录](DEVICE_STANDARDIZATION_20261022.md) | 2026-10-22三大设备任务、APK提取/分发、保留数据回退命令、回退验证进度及后续设备复用 |
 | [README.md](README.md) | 完成状态与日常启动入口 |
 | [PROJECT_RULES.md](PROJECT_RULES.md) | 当前工作规则与禁止偏离项 |
 | [NEW_SESSION_START.md](NEW_SESSION_START.md) | 新会话接续状态 |

@@ -1,5 +1,8 @@
 # 项目执行入口
 
+2026-10-22新增三项设备任务：统一抖音版本、重新定位、统一USB接口。处理这些任务前完整读取[设备统一执行记录](DEVICE_STANDARDIZATION_20261022.md)，沿用既定回退操作；当前手机暂停在小米账号安装验证，保留数据卸载已返回Success。用户要求后续同类设备直接复用，不重新分析方案，不将“尽量保留账号登录”扩大为“全部数据必须保留”。
+
+
 先完整读取[PROJECT_RULES.md](PROJECT_RULES.md)，再读取[NEW_SESSION_START.md](NEW_SESSION_START.md)、[MILESTONE_20261014.md](MILESTONE_20261014.md)及当前操作对应的完整依据。
 
 当前为2026-10-14顺序执行完成节点。复用先读[REUSE_GUIDE.md](REUSE_GUIDE.md)，不按docs/history的旧待办重新开发或重复核查已经通过的手机流程。

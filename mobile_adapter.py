@@ -216,7 +216,13 @@ class MobileAdapter:
         output = _ocr_extension().process1(
             图片路径或图片url=str(directory / filename), 输出完整结果=True,
             文字检测框过滤的阈值=0.5, 文字检测框的大小=2)
-        items = output["OCR识别结果"] if isinstance(output, dict) else output.OCR识别结果
+        if isinstance(output, list):
+            # 现场公开入口直接返回结果列表；部分运行时包装单个输出为一层列表。
+            items = output[0] if len(output) == 1 and isinstance(output[0], list) else output
+        elif isinstance(output, dict):
+            items = output["OCR识别结果"]
+        else:
+            items = output.OCR识别结果
         if not isinstance(items, list):
             raise TypeError("离线OCR未返回完整结果列表")
         return items

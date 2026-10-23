@@ -103,6 +103,42 @@ class AdapterTests(unittest.TestCase):
         adapter.input_cursor("评论")
         phone.sys_input.assert_called_once_with("评论", False, False, delay_after=1)
 
+    def test_ocr_accepts_actual_list_and_single_output_wrappers(self):
+        items = [{"text": "发送", "score": 0.99, "box": [10, 20, 110, 60]}]
+        for output in (items, [items], {"OCR识别结果": items}, [], [[]]):
+            with self.subTest(output=output):
+                extension = types.SimpleNamespace(process1=mock.Mock(return_value=output))
+                phone = mock.Mock()
+                with mock.patch("mobile_adapter._ocr_extension", return_value=extension):
+                    actual = MobileAdapter(phone).ocr_screen()
+                self.assertEqual(actual, items if output not in ([], [[]]) else [])
+
+    def test_filter_list_results_click_both_options_before_scanning(self):
+        from mobile_executor import Executor
+
+        items = [{"text": "一天内", "box": [10, 100, 110, 140]},
+                 {"text": "查看结果", "box": [200, 500, 400, 560]}]
+        for output in (items, [items]):
+            with self.subTest(wrapped=output is not items):
+                phone = mock.Mock()
+                adapter = MobileAdapter(phone)
+                snapshot = mock.Mock()
+                snapshot.candidates.return_value = [1]
+                executor = Executor(adapter, mock.Mock(), sleep=lambda seconds: None)
+                extension = types.SimpleNamespace(process1=mock.Mock(return_value=output))
+                with mock.patch("mobile_adapter._ocr_extension", return_value=extension), \
+                        mock.patch.object(executor, "switch_section"), \
+                        mock.patch.object(executor, "verify_candidate", return_value="MATCH"), \
+                        mock.patch.object(adapter, "snapshot", return_value=snapshot):
+                    result = executor.find_work(
+                        {"content_type": "视频", "expected_author": "作者"},
+                        (0, 100, 1080, 200))
+                self.assertEqual(result, (True, False))
+                extension.process1.assert_called_once()
+                self.assertEqual(phone.click.call_args_list,
+                                 [mock.call(60, 120, delay_after=1),
+                                  mock.call(300, 530, delay_after=1)])
+
     def test_profile_id_wait_is_three_seconds_and_no_nickname_fallback(self):
         phone = mock.Mock()
         phone.find_all_by_xpath.return_value = []

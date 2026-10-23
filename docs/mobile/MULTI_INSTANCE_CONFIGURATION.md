@@ -1,6 +1,8 @@
 # 多开接入与安装
 
-本分支已编写实例枚举、按空间启动、前台实例核对、共享连接顺序执行、独立进度和网页数量适配。B尚未安装本次更新，主副启动及影刀操作副本仍待B真机验证；离线通过不代表已在手机通过。
+本分支已接入实例枚举、按空间启动、前台实例核对、共享连接顺序执行、独立进度和网页数量适配。2026-10-23用户已安装，确认前端实例数量识别正确、常驻运行可自动领取新任务。筛选OCR返回list的解析问题已修正，用户替换后反馈“可运行”。本阶段收口，后续出现实际问题再处理。
+
+packages/Douyin-Instances-Update.zip仍为前一阶段安装包，尚未包含本次OCR修正。以后按下方步骤安装后，还须在影刀编辑器中将mobile_adapter.py完整替换为仓库当前同名源码并保存。已替换模块且可运行的当前B无需重复安装；以下步骤用于以后复用。
 
 ## 安装
 
@@ -38,6 +40,6 @@
 
 已在隔离目录读取用户提供的当前状态文件，5个项目和4个设备记录可按新结构加载，文件保持原字节；用户状态不随包交付或提交仓库。
 
-离线执行环境为Python3.12。Windows PowerShell安装链和真实Android主副切换尚未在B执行。仓库较早的非mobile测试存在与现行核心/安装接口不匹配的历史断言，不能用本次定向检查冒充整个历史测试集通过。
+离线执行环境为Python3.12。本次OCR修正的24项适配/执行检查通过，Python3.7语法通过。用户已在B安装、运行并确认当前可运行；该结论不扩写为所有设备、作品类型及续执行场景逐项通过。仓库较早测试存在与现行核心/安装接口不匹配的历史断言，不以定向检查冒充整个历史测试集通过。
 
 Android接口依据：[ADB服务协议](https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/main/docs/dev/services.md)、[用户信息标志](https://android.googlesource.com/platform/frameworks/base/+/master/core/java/android/content/pm/UserInfo.java)、[按用户解析应用入口](https://android.googlesource.com/platform/frameworks/base/+/main/services/core/java/com/android/server/pm/PackageManagerShellCommand.java)。这些依据支持实现机制，不替代B真机验证。

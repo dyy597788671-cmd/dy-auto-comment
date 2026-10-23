@@ -1314,7 +1314,7 @@ class UnifiedGateway:
                             return {"task_id": identity, "accounts": available, "wait_seconds": 0, "messages": messages}
                         if identity == current and task_waits:
                             self._save_state(state)
-                            return {"task_id": identity, "accounts": [], "wait_seconds": min(task_waits), "messages": messages}
+                            return {"task_id": identity, "accounts": [], "wait_seconds": min(5.0, min(task_waits)), "messages": messages}
                         if identity == current and any(v["status"] == "RUNNING" for v in project["accounts"].values()):
                             self._save_state(state)
                             return {"task_id": identity, "accounts": [], "wait_seconds": 0,
@@ -1331,7 +1331,7 @@ class UnifiedGateway:
                         self.logger.warning("dispatch_task_unavailable task_id=%s code=%s message=%s", identity, exc.code, exc)
                 dispatch["current_task_id"] = None
                 self._save_state(state)
-                return {"task_id": None, "accounts": [], "wait_seconds": min(waits) if waits else 0, "messages": messages}
+                return {"task_id": None, "accounts": [], "wait_seconds": min(5.0, min(waits)) if waits else 0, "messages": messages}
             finally:
                 workbook.close()
 
@@ -1609,6 +1609,16 @@ class UnifiedGateway:
             resumed.append(account)
         if not resumed:
             raise EngineError("NOTHING_TO_RESUME", "没有可续发的未完成设备；已成功设备不会重做")
+        # An explicit resume releases only the requested devices for this run.
+        # A device already executing another task must keep its live ownership.
+        for account in resumed:
+            device = state["devices"].get(account, {})
+            if device.get("state") == "COOLDOWN" and not device.get("active_task"):
+                device.update(state="READY", cooldown_until=None)
+        if "dispatch" in state:
+            state["dispatch"]["skipped_accounts"] = [
+                account for account in state["dispatch"]["skipped_accounts"]
+                if account not in resumed]
         self._sync_project(state, identity)
         return {"task_id": identity, "resumed_accounts": resumed,
                 "progress": self._project_progress(state, identity)}

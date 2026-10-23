@@ -1,10 +1,12 @@
 """采集当前影刀的真实调用接口；不查找元素、不操作手机、不导入新SDK。"""
 import ast
 import inspect
+import io
 import json
 from pathlib import Path
 import sys
 import tempfile
+import tokenize
 
 
 def _describe(value):
@@ -31,9 +33,30 @@ def _class_api(device):
     return result
 
 
+def _statement_sources(source):
+    """按逻辑语句保留源码，兼容没有AST结束位置的旧Python。"""
+    lines = source.splitlines(True)
+    statements = {}
+    start = None
+    ignored = (tokenize.INDENT, tokenize.DEDENT, tokenize.NL,
+               tokenize.COMMENT, tokenize.ENCODING)
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type in (tokenize.NEWLINE, tokenize.ENDMARKER):
+            if start is not None:
+                end = min(token.start[0], len(lines))
+                code = "".join(lines[start - 1:end]).rstrip("\r\n")
+                for line in range(start, end + 1):
+                    statements[line] = code
+                start = None
+        elif start is None and token.type not in ignored:
+            start = token.start[0]
+    return statements
+
+
 def _call_sites(path):
     source = path.read_text(encoding="utf-8-sig")
     tree = ast.parse(source, filename=path.name)
+    statements = _statement_sources(source)
     extensions = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("xbot_extensions"):
@@ -55,7 +78,7 @@ def _call_sites(path):
     calls = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
-            segment = ast.get_source_segment(source, node)
+            segment = statements.get(node.lineno, "")
             if "xbot" in (segment or ""):
                 imports.append(segment)
         if not isinstance(node, ast.Call):
@@ -65,7 +88,7 @@ def _call_sites(path):
         if (".mobile." in name or name.startswith(("phone_device.", "phone_devices[]"))
                 or root in extensions or name == "xbot_visual.process.run"):
             calls.append({"line": node.lineno, "function": name,
-                          "code": ast.get_source_segment(source, node)})
+                          "code": statements.get(node.lineno, "")})
     return {"file": path.name, "imports": imports, "calls": sorted(calls, key=lambda item: item["line"])}
 
 
@@ -106,3 +129,4 @@ def collect(phone_device):
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print("手机接口报告：" + str(path))
     return str(path)
+

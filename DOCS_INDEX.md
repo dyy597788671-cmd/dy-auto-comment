@@ -4,6 +4,10 @@
 
 | 文件 | 用途 |
 | --- | --- |
+| [脚本迁移方案](MOBILE_SCRIPT_MIGRATION_PLAN.md) | 已批准的脚本优先实施、五项调整、模块边界与双开接入 |
+| [新会话实施入口](MOBILE_IMPLEMENTATION_HANDOFF.md) | 直接开始配置，不重搭198行 |
+| [完整执行流程](docs/mobile/EXECUTION_FLOW.md) | F01—F61逐步流程与评论/回退分支；对应flow_plan.json |
+| [全部定位规则](docs/mobile/ELEMENT_LOCATORS.md) | 27项规则与L13动态表达式；对应locator_plan.json |
 | [手机执行需求](MOBILE_EXECUTION_REQUIREMENTS.md) | 已确认的集中定位、子流程压缩、双开自动识别与独立执行需求；区分确认目标和未实现事项 |
 | [设备统一执行记录](DEVICE_STANDARDIZATION_20261022.md) | 2026-10-22三大设备任务、APK提取/分发、保留数据回退命令、回退验证进度及后续设备复用 |
 | [README.md](README.md) | 完成状态与日常启动入口 |

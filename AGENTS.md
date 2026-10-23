@@ -1,6 +1,8 @@
 # 项目执行入口
 
-2026-10-22设备任务：统一抖音版本、重新定位、统一USB接口。用户现已确认APP版本统一、小米账号已登录、回退版本可行，安装验证不再是当前暂停点。新增已确认需求：集中维护ID/XPath、将近两百行子流程迁移为少量调用，以及自动识别同手机的主/双开抖音并分别启动、独立记录进度。处理前完整读取[手机执行需求](MOBILE_EXECUTION_REQUIREMENTS.md)和[设备统一执行记录](DEVICE_STANDARDIZATION_20261022.md)。本次仅登记需求与现场状态，双开及流程迁移尚未实现或真机验证。用户要求后续同类设备直接复用既定回退操作，不重新分析方案，不将“尽量保留账号登录”扩大为“全部数据必须保留”。
+2026-10-23当前任务：按已确认方案开始集中定位和脚本迁移。先完整读取[MOBILE_IMPLEMENTATION_HANDOFF.md](MOBILE_IMPLEMENTATION_HANDOFF.md)、[MOBILE_SCRIPT_MIGRATION_PLAN.md](MOBILE_SCRIPT_MIGRATION_PLAN.md)及其中两份流程/定位正文。用户选择脚本优先，保留主流程连接调度结构与子流程1入口，仅在脚本不能直接完成时保留必要卡片。定位已改为无固定ID依赖的语义/同卡片关系，不能沿用旧“优先ID”要求；五项审查调整已确定。当前只更新方案，运行基线仍为20/198行，手机执行模块和双开尚未实装验证。
+
+版本统一、小米登录及回退可行性已经确认，复用[设备统一执行记录](DEVICE_STANDARDIZATION_20261022.md)；双开自动枚举、分别启动与独立进度要求见[手机执行需求](MOBILE_EXECUTION_REQUIREMENTS.md)。不重做已通过安装，不把归档缺口变成全面重搭流程的理由。
 
 
 先完整读取[PROJECT_RULES.md](PROJECT_RULES.md)，再读取[NEW_SESSION_START.md](NEW_SESSION_START.md)、[MILESTONE_20261014.md](MILESTONE_20261014.md)及当前操作对应的完整依据。

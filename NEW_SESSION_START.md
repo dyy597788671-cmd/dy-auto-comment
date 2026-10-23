@@ -1,10 +1,12 @@
 # 新会话接续入口
 
-## 当前配置任务（2026-10-23，优先于下方历史入口）
+## 当前脚本接入进度（2026-10-23，优先于下方历史入口）
 
-用户已批准方案，准备在新会话立即配置。直接完整读[MOBILE_IMPLEMENTATION_HANDOFF.md](MOBILE_IMPLEMENTATION_HANDOFF.md)和[MOBILE_SCRIPT_MIGRATION_PLAN.md](MOBILE_SCRIPT_MIGRATION_PLAN.md)，再读[完整执行流程](docs/mobile/EXECUTION_FLOW.md)与[全部定位规则](docs/mobile/ELEMENT_LOCATORS.md)。首项是核对当前手机/OCR最小真实接口，随后交付完整Python模块及少量调用配置，不继续研究是否使用脚本，不要求重搭198行。
+当前代码见[脚本接入说明](docs/mobile/SCRIPT_CONFIGURATION.md)。已完成mobile_locators.py、mobile_adapter.py和mobile_executor.py，37项离线检查及Python3.7语法检查通过。B只运行过接口采集，尚未部署或实跑新执行流程。下一步在现有应用新建三个Python模块并粘贴源码，将主流程新增的第7行调用改为mobile_adapter.check_environment，保留第8行start_execution断点；加载通过后再接入子流程1。
 
-已确定：取消固定ID依赖；传统/Compose兼容；每方向6次滑动；节点签名优先且连续3次不变；点赞收藏分享共用定义；首位好友保留关系；主页抖音号最多等待3秒。L13原式合法，F11保持无限回退，原评论和回退差异保留。当前完成的是方案同步，运行源码与B流程尚未更新，双开仍待实现和实测。
+已从两份B报告核对Python3.7.4、MobileSession与MobileElement接口、lxml可用及activity_179ea575公开process1的完整中文入参。OCR可由脚本调用，当前无需OCR卡片桥接。报告未包含手机可视化流程正文，已确认的F01—F61及定位正文仍作为编码依据，不再反复采集已取得的接口。
+
+已确认方案仍为[MOBILE_SCRIPT_MIGRATION_PLAN.md](MOBILE_SCRIPT_MIGRATION_PLAN.md)，流程与定位见[完整执行流程](docs/mobile/EXECUTION_FLOW.md)、[全部定位规则](docs/mobile/ELEMENT_LOCATORS.md)。L13全局同名序号、F11无限回退、两种评论差异、每方向6次滑动及连续3次签名不变均保留。当前实现承接原物理设备名册，双开名册、指定空间启动、前台实例核对及网页数量适配仍未实现，不冒充双开通过。
 
 ## 当前设备任务（2026-10-22）
 
@@ -50,3 +52,4 @@
 仅缺**B当前完整影刀原生工程最终导出**，用于保留真实主/子流程、模块及元素库。已保存的旧导出不能替代。此次补收属于冻结完成版本；不要求重抓元素、重测全流程、开发新程序或建立备份制度。
 
 settings.json已交付，默认300/600；用户反馈原config目录没有此文件。尚无单独反馈证明已放入B或修改了数值，不写成已安装或已取消冷却。
+

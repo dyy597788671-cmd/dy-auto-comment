@@ -29,7 +29,7 @@ COOKIE = "dy_tool_browser"
 class ToolServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, root, lan_ip="192.168.11.10"):
+    def __init__(self, address, root, lan_ip="127.0.0.1"):
         self.root = Path(root).resolve()
         self.lan_ip = lan_ip
         for path in (self.root / "core_runner.py", self.root / "data" / "task_cases.xlsx"):
@@ -139,7 +139,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = {"application": "douyin-local-tool", "admin": admin, "csrf": self._signature("csrf:" + owner),
                         "lan_url": "http://" + self.server.lan_ip + ":" + str(self.server.server_port), "version": bridge.VERSION}
                 try:
-                    data["connected_device_count"] = bridge.connected_device_count()
+                    data.update(bridge.connected_inventory(self.server.root))
                 except core.EngineError as exc:
                     # Startup health and history remain available before the phone manager opens.
                     data.update(connected_device_count=None, device_status_message=str(exc))
@@ -207,7 +207,7 @@ def main():
     parser = argparse.ArgumentParser(description="抖音任务工具")
     parser.add_argument("--root", default=str(ROOT))
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--lan-ip", default="192.168.11.10")
+    parser.add_argument("--lan-ip", default="127.0.0.1")
     parser.add_argument("--open", action="store_true")
     args = parser.parse_args()
     server = ToolServer(("0.0.0.0", args.port), args.root, args.lan_ip)

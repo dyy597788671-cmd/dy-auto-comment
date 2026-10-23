@@ -72,10 +72,8 @@ def _allocation_wait_seconds(gateway):
 
 
 def _device_bindings(connection_infos):
-    if not isinstance(connection_infos, list):
-        raise ValueError("connection_infos需要当前实际连接的手机详情列表")
-    return [{"device_id": info["udid"], "sender_account_id": "设备_" + info["udid"],
-             "connection_index": index} for index, info in enumerate(connection_infos)]
+    import mobile_instances
+    return mobile_instances.discover_roster(connection_infos, PROJECT_ROOT)
 
 
 def start_execution(connection_infos):
@@ -91,13 +89,13 @@ def start_execution(connection_infos):
 
 def prepare_devices(connection_infos):
     """Each outer-loop iteration returns this task's devices only."""
-    bindings = _device_bindings(connection_infos)
-    if not bindings:
-        print("当前连接设备总数：0台，没有可执行设备；任务保留。")
-        return []
-    gateway = core_runner.UnifiedGateway(PROJECT_ROOT, bindings[0]["sender_account_id"])
-    roster = core_runner._connected_devices(bindings)
     while True:
+        bindings = _device_bindings(connection_infos)
+        if not bindings:
+            print("当前没有可用抖音实例；任务保留，读取结果见网页。")
+            return []
+        gateway = core_runner.UnifiedGateway(PROJECT_ROOT, bindings[0]["sender_account_id"])
+        roster = core_runner._connected_devices(bindings)
         selection = gateway.select_dispatch(roster)
         for message in selection["messages"]:
             print(message)
@@ -309,3 +307,4 @@ def make_nav_swipe_points(bounds):
 
 
 # LAN_TOOL_INTAKE_V1
+

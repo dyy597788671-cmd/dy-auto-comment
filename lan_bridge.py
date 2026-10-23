@@ -23,7 +23,7 @@ from pathlib import Path
 
 import core_runner as core
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 DB_NAME = "lan_tool.sqlite3"
 
 
@@ -169,7 +169,7 @@ def _read_adb_online_devices():
     return online
 
 
-def connected_device_count():
+def _online_registered_devices():
     """Intersect registration IDs with live status from the existing service."""
     local_app_data = os.environ.get("LOCALAPPDATA")
     message = "无法读取影刀当前设备状态，请确认B电脑的影刀手机管理器已打开，现有手机连接服务正在运行。"
@@ -190,9 +190,31 @@ def connected_device_count():
             if not isinstance(identity, str) or not identity.strip():
                 raise ValueError("已登记设备缺少标识")
             devices.add(identity.strip().casefold())
-        return len(devices & _read_adb_online_devices())
+        return devices & _read_adb_online_devices()
     except (OSError, UnicodeError, ValueError) as exc:
         raise core.EngineError("DEVICE_STATUS_UNAVAILABLE", message) from exc
+
+
+def connected_inventory(root):
+    import mobile_instances
+    online = _online_registered_devices()
+    try:
+        inventory = mobile_instances.cached_inventory(root, online)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise core.EngineError("DEVICE_STATUS_UNAVAILABLE", "抖音实例名单读取失败：" + str(exc)) from exc
+    ready = inventory["inventory_ready"]
+    message = "；".join(inventory["discovery_errors"])
+    if not ready:
+        message = "请从影刀主流程第1行运行一次，自动读取每台手机的抖音实例。"
+    return {"connected_device_count": inventory["instance_count"] if ready else None,
+            "connected_physical_device_count": len(online), "device_status_message": message}
+
+
+def connected_device_count(root=None):
+    inventory = connected_inventory(root or Path(core.__file__).resolve().parent)
+    if inventory["connected_device_count"] is None:
+        raise core.EngineError("DEVICE_STATUS_UNAVAILABLE", inventory["device_status_message"])
+    return inventory["connected_device_count"]
 
 
 def validate_payload(values, gateway, connected_count=None):
@@ -237,7 +259,7 @@ def validate_payload(values, gateway, connected_count=None):
 
 def submit(root, owner, source_ip, values, return_details=False):
     gateway = gateway_for(root)
-    connected_count = connected_device_count()
+    connected_count = connected_device_count(root)
     try:
         payload = validate_payload(values, gateway, connected_count)
     except core.EngineError as exc:

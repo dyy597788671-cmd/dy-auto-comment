@@ -206,7 +206,7 @@ class ExecutorTests(unittest.TestCase):
         business = mock.Mock()
         business.read_task.return_value = dict(TASK)
         business.finish_device_error.return_value = {"released": True}
-        identity = {"sender_account_id": "account-1", "device_id": "phone-1", "task_id": "task-1"}
+        identity = {"sender_account_id": "account-1", "device_id": "phone-1", "task_id": "task-1", "android_user_id": 0, "package_name": "com.ss.android.ugc.aweme"}
         with mock.patch("mobile_executor.importlib.import_module", return_value=business), \
                 mock.patch.object(Executor, "execute", side_effect=RuntimeError("原始手机异常")):
             result = run(object(), identity)
@@ -217,7 +217,7 @@ class ExecutorTests(unittest.TestCase):
         business = mock.Mock()
         business.read_task.side_effect = RuntimeError("原始读取异常")
         business.finish_device_error.return_value = {"released": False}
-        identity = {"sender_account_id": "account-1", "device_id": "phone-1", "task_id": "task-1"}
+        identity = {"sender_account_id": "account-1", "device_id": "phone-1", "task_id": "task-1", "android_user_id": 0, "package_name": "com.ss.android.ugc.aweme"}
         with mock.patch("mobile_executor.importlib.import_module", return_value=business):
             with self.assertRaisesRegex(RuntimeError, "原始读取异常"):
                 run(object(), identity)

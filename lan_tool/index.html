@@ -7,10 +7,10 @@
 <form id="task-form">
 <label>搜索关键词<input name="keyword" maxlength="512" required placeholder="例如：云南旅居" autocomplete="off"></label>
 <div class="two"><label>作者昵称<input name="expected_author" maxlength="256" required placeholder="与作品作者一致"></label><label>抖音号<input name="expected_douyin_id" maxlength="256" required placeholder="完整抖音号" inputmode="text"></label></div>
-<div class="two"><label>作品类型<select name="content_type"><option value="视频">视频</option><option value="图文">图文</option></select></label><label>执行设备数量<input name="target_device_count" type="number" min="1" step="1" value="1" required></label></div>
-<p id="device-count" class="form-note" aria-live="polite">正在读取当前连接设备数量…</p>
+<div class="two"><label>作品类型<select name="content_type"><option value="视频">视频</option><option value="图文">图文</option></select></label><label>调用抖音数量<input name="target_device_count" type="number" min="1" step="1" value="1" required></label></div>
+<p id="device-count" class="form-note" aria-live="polite">正在读取可用抖音数量…</p>
 <label>执行时间<input name="scheduled_time" value="0" placeholder="默认0，可留空"><small>默认0或留空立即排队；10表示延后10分钟，14:30表示北京时间14:30，也可填完整日期和时间。</small></label>
-<label>候选评论<textarea name="comments" rows="6" maxlength="32767" required placeholder="每行一条评论&#10;各设备随机使用不同评论"></textarea><small id="comment-count">有效评论 0 条，至少需要 1 条。</small></label>
+<label>候选评论<textarea name="comments" rows="6" maxlength="32767" required placeholder="每行一条评论&#10;各抖音随机使用不同评论"></textarea><small id="comment-count">有效评论 0 条，至少需要 1 条。</small></label>
 <button type="submit" class="primary" id="submit" disabled>保存并提交 <span aria-hidden="true">→</span></button>
 <p class="form-note">自动生成任务 ID。空闲时立即入表；发布或表格占用期间暂存，空闲后自动追加。</p>
 </form><div class="browser-note">本浏览器保留你的提交历史。换浏览器或清除 Cookie 后，不会自动接续原历史。</div></aside>
@@ -18,7 +18,7 @@
 <div id="notice" class="notice" role="status" hidden></div><p id="scope" class="scope">正在读取记录…</p>
 <div id="history-panel"><div class="table-wrap"><table><thead><tr><th>任务 / 作者</th><th>进度</th><th>点赞</th><th>收藏</th><th>评论</th><th>分享</th><th>操作</th></tr></thead><tbody id="tasks"></tbody></table></div><div id="empty-tasks" class="empty" hidden><span class="empty-icon" aria-hidden="true">＋</span><h3>这里会显示你的任务</h3><p>先在左侧提交一条，执行结果会保留在这里。</p></div></div>
 <div id="errors-panel" hidden><div class="error-hint">错误独立保留，清理任务后仍可查看。正常未找到作品不属于程序错误。</div><div id="errors"></div><div id="empty-errors" class="empty" hidden><span class="empty-icon success" aria-hidden="true">✓</span><h3>没有已记录的错误</h3><p>未写入日志的历史错误无法还原。</p></div></div>
-<footer>每台设备每项动作成功最多计 1 次，重试不重复累计。<span id="version"></span></footer></section></main>
+<footer>每个抖音每项动作成功最多计 1 次，重试不重复累计。<span id="version"></span></footer></section></main>
 <dialog id="detail"><div class="dialog-head"><div><span class="eyebrow">TASK DETAIL</span><h2>任务详情</h2></div><button type="button" id="close-detail" class="close" aria-label="关闭">×</button></div><div id="detail-content"></div></dialog>
 <dialog id="cleanup"><div class="dialog-head"><h2>清理异常任务</h2><button type="button" id="close-cleanup" class="close" aria-label="关闭">×</button></div><p id="cleanup-target"></p><p>删除此任务的运行记录和占用。提交历史、成功计数和错误记录保留，其他任务不受影响。</p><label id="stop-row" class="check" hidden><input type="checkbox" id="stopped">我已停止 B 电脑上的影刀运行</label><p id="cleanup-message" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-cleanup" class="secondary">取消</button><button type="button" id="confirm-cleanup" class="danger">清理此任务</button></div></dialog>
 <dialog id="resume"><div class="dialog-head"><h2>续接中断记录</h2><button type="button" id="close-resume" class="close" aria-label="关闭">×</button></div><p id="resume-target"></p><p>保留已保存的动作，只排队执行未完成部分。请先停止B电脑当前影刀运行，避免打断正在执行的设备。</p><label class="check"><input type="checkbox" id="resume-stopped">我已停止B电脑上的影刀运行</label><p id="resume-message" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-resume" class="secondary">取消</button><button type="button" id="confirm-resume" class="primary">恢复续发</button></div></dialog>

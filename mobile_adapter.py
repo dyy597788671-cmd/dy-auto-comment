@@ -145,8 +145,9 @@ def check_environment(phone_device):
 
 
 class MobileAdapter:
-    def __init__(self, phone_device):
+    def __init__(self, phone_device, device_identity=None):
         self.device = phone_device
+        self.device_identity = device_identity
 
     def exists(self, locator_id, **parameters):
         # 从当前XML判断存在性，不假定旧SDK的timeout=0轮询行为。
@@ -183,7 +184,11 @@ class MobileAdapter:
         return ResultSnapshot(self.device.get_page_source(), self.device.get_window_size())
 
     def open_app(self):
-        self.device.open_app(loc.APP_PACKAGE)
+        if self.device_identity is None:
+            self.device.open_app(loc.APP_PACKAGE)
+        else:
+            import mobile_instances
+            mobile_instances.launch_instance(self.device, self.device_identity)
 
     def back(self):
         self.device.back(delay_after=1)

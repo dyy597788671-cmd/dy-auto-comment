@@ -1,5 +1,7 @@
 # 手机执行脚本接入
 
+最新进度：B环境检查已返回READY。实例名单、启动、独立状态及网页计数代码已接入本分支，待安装与真机验证，安装入口及完整操作见[MULTI_INSTANCE_CONFIGURATION.md](MULTI_INSTANCE_CONFIGURATION.md)。本节优先于下方早期物理设备阶段记录。
+
 本分支按已确认的迁移方案实现集中定位与现有物理设备执行链，保留原module1任务/进度接口。
 mobile_locators.py、mobile_adapter.py、mobile_executor.py已完成离线验证，尚未在B接入执行。
 系统双开名册、指定空间启动、前台实例核对及网页数量适配仍待后续实施；当前执行入口明确拒绝带android_user_id的实例，避免按默认主程序误执行。

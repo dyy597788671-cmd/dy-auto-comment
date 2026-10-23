@@ -1,5 +1,13 @@
 # 新会话接续入口
 
+## 最新：多开代码待B安装（2026-10-23）
+
+用户已要求修改并接入多开。按[多开安装说明](docs/mobile/MULTI_INSTANCE_CONFIGURATION.md)部署Douyin-Instances-Update.zip，在原工具目录执行Apply-Instances.cmd，保留原setup_tool.ps1供读取路径参数。更新后Start-Tool.cmd不再运行旧安装器。主流程start_execution、prepare_devices和子流程run的参数映射不变，从第1行运行后产生实例名单，网页刷新按实例计数。
+
+B已返回mobile_adapter.check_environment的READY，确认三个模块和OCR公开入口加载。尚未取得新执行器完成手机任务的实跑结果。后续B运行旧v1.1.0启动器，日志确认实际覆盖更新；后台HTTP检查通过。持续等待的当前状态与连接参数显示：待续发原手机未在本轮名单，当前手机对应任务已NOT_FOUND，不能改绑原任务或删除进度来解决。没有冷却未到期的证据。
+
+本分支已完成实例名单、按空间启动和前台核对、独立状态、网页计数和保留数据的更新脚本，60项定向离线检查通过；新核心可读取当前上传状态且原字节不变。Windows安装及主副抖音真机切换仍待验证，不把写代码称为已在B运行。以下较早的“尚未实现双开”指当时状态，不覆盖本节。
+
 ## 当前脚本接入进度（2026-10-23，优先于下方历史入口）
 
 当前代码见[脚本接入说明](docs/mobile/SCRIPT_CONFIGURATION.md)。已完成mobile_locators.py、mobile_adapter.py和mobile_executor.py，37项离线检查及Python3.7语法检查通过。B只运行过接口采集，尚未部署或实跑新执行流程。下一步在现有应用新建三个Python模块并粘贴源码，将主流程新增的第7行调用改为mobile_adapter.check_environment，保留第8行start_execution断点；加载通过后再接入子流程1。

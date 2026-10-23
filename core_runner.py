@@ -171,18 +171,18 @@ def _target_count(value: Any) -> Optional[int]:
 
 
 def _device_count_message(total: int, requested: int) -> str:
-    return f"当前连接设备总数：{total}台；本条设备数量：{requested}台，超过总数，请调整。"
+    return f"当前可用抖音总数：{total}个；本条调用数量：{requested}个，超过总数，请调整。"
 
 
 def _comment_count_message(total: int, requested: int) -> str:
-    return f"去重后的有效评论数量：{total}条；本条设备数量：{requested}台，评论不足，请补充。"
+    return f"去重后的有效评论数量：{total}条；本条调用抖音数量：{requested}个，评论不足，请补充。"
 
 
 def _connected_devices(values: Any) -> List[Dict[str, str]]:
     """A fresh actual-device snapshot supplied by ShadowBot, never settings.json."""
     if not isinstance(values, list) or not values:
         raise EngineError("CONNECTED_DEVICES_REQUIRED", "请传入影刀当前实际连接的设备及执行账号列表")
-    devices, accounts, result = set(), set(), []
+    devices, accounts, instances, result = {}, set(), set(), []
     for value in values:
         if not isinstance(value, dict):
             raise EngineError("INVALID_CONNECTED_DEVICES", "设备项须包含device_id和sender_account_id")
@@ -190,12 +190,39 @@ def _connected_devices(values: Any) -> List[Dict[str, str]]:
         if any(not isinstance(v, str) or not v.strip() or v != v.strip() or len(v) > 256
                for v in (physical, account)):
             raise EngineError("INVALID_CONNECTED_DEVICES", "设备和账号标识须为非空固定字符串")
-        if physical in devices or account in accounts:
+        has_instance = "android_user_id" in value
+        if account in accounts or (physical in devices and (not has_instance or not devices[physical])):
             raise EngineError("DUPLICATE_DEVICE_ACCOUNT", "同一批连接设备不能重复设备或执行账号")
-        devices.add(physical)
+        item = {"device_id": physical, "sender_account_id": account}
+        if has_instance:
+            user, package = value["android_user_id"], value.get("package_name")
+            if (isinstance(user, bool) or not isinstance(user, int) or user < 0
+                    or package != "com.ss.android.ugc.aweme"):
+                raise EngineError("INVALID_CONNECTED_DEVICES", "抖音实例缺少有效的用户空间或包名")
+            key = (physical, user, package)
+            if key in instances:
+                raise EngineError("DUPLICATE_DEVICE_ACCOUNT", "同一抖音实例不能重复分配执行身份")
+            instances.add(key)
+            item.update({k: value[k] for k in ("android_user_id", "package_name", "display_name", "is_primary") if k in value})
+        devices[physical] = has_instance
         accounts.add(account)
-        result.append({"device_id": physical, "sender_account_id": account})
+        result.append(item)
     return result
+
+
+def _discovered_instance_account(root, account):
+    """Read the controller's instance registry; never enumerate or operate a phone."""
+    path = Path(root) / "data/mobile_instances.json"
+    if not path.exists():
+        return False
+    try:
+        registry = json.loads(path.read_text(encoding="utf-8-sig"))
+        if registry.get("schema_version") != 1:
+            return False
+        return any(item.get("sender_account_id") == account
+                   for phone in registry["phones"].values() for item in phone["instances"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise EngineError("INSTANCE_REGISTRY_INVALID", "抖音实例名册不可读：" + str(exc)) from exc
 
 
 def _douyin_id(value: Any) -> str:
@@ -710,7 +737,7 @@ class UnifiedGateway:
                 or any(not isinstance(value, str) or not value.strip() or value != value.strip()
                        for value in accounts) or len(accounts) != len(set(accounts))):
             raise EngineError("CONFIG_INVALID", "sender_accounts 必须为不重复的账号标识列表")
-        if accounts and self.device_id not in accounts:
+        if accounts and self.device_id not in accounts and not _discovered_instance_account(self.root, self.device_id):
             raise EngineError("ACCOUNT_NOT_CONFIGURED", "当前账号不在sender_accounts中")
         self.state_path = self.root / "data" / "runtime_state.json"
         self.lock_path = self.root / "data" / ".core_runner.lock"
@@ -1018,7 +1045,7 @@ class UnifiedGateway:
         identity = _task_id(task_id)
         roster = _connected_devices(connected_devices)
         configured = self.settings["sender_accounts"]
-        if configured and any(v["sender_account_id"] not in configured for v in roster):
+        if configured and any(v["sender_account_id"] not in configured and "android_user_id" not in v for v in roster):
             raise EngineError("ACCOUNT_NOT_CONFIGURED", "连接名单含未登记的执行账号")
         with self._session() as state:
             return self._allocate_task_locked(state, identity, roster)
@@ -1026,7 +1053,7 @@ class UnifiedGateway:
     def _allocate_task_locked(self, state, identity, roster):
         # LAN_TOOL_INTAKE_V1
         configured = self.settings["sender_accounts"]
-        if configured and any(v["sender_account_id"] not in configured for v in roster):
+        if configured and any(v["sender_account_id"] not in configured and "android_user_id" not in v for v in roster):
             raise EngineError("ACCOUNT_NOT_CONFIGURED", "连接名单含未登记的执行账号")
         workbook, sheet, columns, rows, _ = self.scheduler.read()
         try:
@@ -1074,6 +1101,7 @@ class UnifiedGateway:
             "source_key": _source_key(task), "assignment": assignment,
             "accounts": {value["sender_account_id"]: {
                 "physical_device_id": value["device_id"], "status": "PENDING",
+                **{k: value[k] for k in ("android_user_id", "package_name", "display_name", "is_primary") if k in value},
                 "comment_content": comment, "comment_sent": False, "run_token": None,
                 "claimed_at": None, "result": None}
                 for value, comment in zip(selected, comments)}}
@@ -1098,6 +1126,9 @@ class UnifiedGateway:
             plan = active.get("strategy") if active else entry.get("plan")
             details.append({"sender_account_id": account,
                             "physical_device_id": entry.get("physical_device_id"),
+                            "display_name": entry.get("display_name", account),
+                            "android_user_id": entry.get("android_user_id"),
+                            "package_name": entry.get("package_name"),
                             "status": entry.get("status", "PENDING"),
                             "run_token": entry.get("run_token"),
                             "claimed_at": entry.get("claimed_at"),
@@ -1472,6 +1503,8 @@ class UnifiedGateway:
                 raise EngineError("COMMENTS_EXHAUSTED", "项目 " + task["task_id"] +
                                   " 没有未分配评论，请先补充Comments")
             task["comment_content"] = entry["comment_content"] if assignment else secrets.choice(available)
+            if assignment:
+                task.update({k: entry[k] for k in ("android_user_id", "package_name", "display_name", "is_primary") if k in entry})
             active = self.devices.claim(device, task, now)
             # The web intake reads this process identity; it never controls it.
             import lan_bridge
@@ -1876,5 +1909,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
 
 

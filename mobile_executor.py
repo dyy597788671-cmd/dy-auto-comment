@@ -1,4 +1,4 @@
-"""按已确认流程执行当前物理设备任务；双开名册与定向启动另行接入。"""
+"""按已确认流程执行当前抖音实例；主副共用连接，进度按实例保存。"""
 import importlib
 import random
 import time
@@ -167,16 +167,18 @@ def run(phone_device, device_identity):
     physical = device_identity["device_id"]
     task_id = device_identity.get("task_id")
     try:
-        # 当前名册仍为原物理设备；实例名册适配后在此接入定向启动。
-        if "android_user_id" in device_identity:
-            raise RuntimeError("双开实例定向启动尚未接入当前执行模块")
+        if "android_user_id" not in device_identity:
+            raise RuntimeError("主流程尚未读取抖音实例名单，请从主流程第1行运行")
         task = business.read_task(sender_account_id=account, physical_device_id=physical,
                                   resume_active=False, wait_for_task=False)
         if task is None:
             return {"status": "NO_TASK"}
         if task_id is not None and str(task["task_id"]) != str(task_id):
             raise RuntimeError("当前任务与主流程绑定Task_ID不一致")
-        return Executor(MobileAdapter(phone_device), business).execute(task)
+        for name in ("android_user_id", "package_name"):
+            if name in task and task[name] != device_identity[name]:
+                raise RuntimeError("当前抖音实例与原任务绑定不一致")
+        return Executor(MobileAdapter(phone_device, device_identity), business).execute(task)
     except Exception as error:
         print("设备异常：" + str(error))
         outcome = business.finish_device_error(account, physical, str(error), task_id)

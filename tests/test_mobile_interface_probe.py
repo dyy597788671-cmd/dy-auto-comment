@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -103,6 +104,64 @@ class MobileInterfaceProbeTests(unittest.TestCase):
             self.assertEqual(report["device_api"]["page_source"]["kind"], "property")
             self.assertEqual(report["generated_calls"][0]["calls"][0]["function"],
                              "xbot_visual.mobile.sample")
+
+    def test_current_flow_format_and_ocr_sources_are_collected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory)
+            module_dir = app / "xbot_robot"
+            module_dir.mkdir()
+            extension = app / "xbot_extensions" / "activity_179ea575"
+            extension.mkdir(parents=True)
+            flow = '{"name":"子流程1","ocr":{"threshold":0.5}}'
+            (module_dir / "process1.flow").write_text(flow, encoding="utf-8-sig")
+            (app / "main.flow").write_text("主流程", encoding="utf-16")
+            (extension / "process1.py").write_text("def main(args):\n    return args\n", encoding="utf-8")
+            (extension / "package.json").write_text('{"name":"离线OCR"}', encoding="utf-8")
+            data = app / "data"
+            data.mkdir()
+            (data / "task_cases.xlsx").write_text("PRIVATE_TASK", encoding="utf-8")
+            report = {"source_errors": []}
+            probe._project_sources(module_dir, report)
+            self.assertEqual({p["file"] for p in report["flow_sources"]},
+                             {"main.flow", "process1.flow"})
+            self.assertIn(flow, [p["text"] for p in report["flow_sources"]])
+            self.assertEqual({p["file"] for p in report["ocr_sources"]},
+                             {"package.json", "process1.py"})
+            self.assertNotIn("PRIVATE_TASK", json.dumps(report))
+            self.assertEqual(report["source_errors"], [])
+
+    def test_binary_flow_is_preserved(self):
+        import base64
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "process.flow"
+            payload = b"\x00\xff\x01\x80flow"
+            path.write_bytes(payload)
+            entry = probe._source_file(path)
+            self.assertEqual(entry["encoding"], "base64")
+            self.assertEqual(base64.b64decode(entry["base64"]), payload)
+
+    def test_loaded_element_class_is_described_without_instantiation(self):
+        class MobileElement:
+            def __init__(self):
+                raise AssertionError("不应创建元素")
+
+            @property
+            def text(self):
+                raise AssertionError("不应读取元素")
+
+            def sample(self, value):
+                raise AssertionError("不应操作元素")
+
+        module = types.ModuleType("xbot.mobile.appium.element")
+        module.MobileElement = MobileElement
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict(sys.modules, {module.__name__: module}), \
+                mock.patch.object(probe, "__file__", str(Path(directory) / "probe.py")), \
+                mock.patch.object(probe.tempfile, "gettempdir", return_value=directory):
+            report = json.loads(Path(probe.collect(object())).read_text(encoding="utf-8"))
+            api = report["element_api"][module.__name__ + ".MobileElement"]
+            self.assertEqual(api["text"]["kind"], "property")
+            self.assertEqual(api["sample"]["signature"], "(self, value)")
 
 
 if __name__ == "__main__":
